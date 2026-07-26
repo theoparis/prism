@@ -20,6 +20,9 @@ pub const wayland = if (builtin.target.os.tag == .linux) @import("platform/wayla
 // the EGL GBM platform. The gbm package is portable, but the EGL frontend that
 // drives it is host-only, so it is gated with the other host backends.
 pub const gbm = if (builtin.target.os.tag == .linux) @import("platform/gbm.zig") else struct {};
+// Darwin backend: dynamic WindowServer/SkyLight loading lives behind std.DynLib
+// so Prism does not link macOS frameworks at build time.
+pub const darwin = if (builtin.target.os.tag == .macos) @import("platform/darwin.zig") else struct {};
 
 // virtio-gpu present backend (Conduit driver). Only meaningful on freestanding
 // where the guest kernel owns the device and identity-maps it. Gated to
