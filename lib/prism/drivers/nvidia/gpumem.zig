@@ -119,9 +119,11 @@ pub fn readBytes(dst: []u8, src_bytes: []const u8, len: usize) void {
     const words = len / @sizeOf(u32);
     if (words > 0) {
         const src: [*]const volatile u32 = @ptrCast(@alignCast(src_bytes.ptr));
-        const dst_words: [*]u32 = @ptrCast(@alignCast(dst.ptr));
         var i: usize = 0;
-        while (i < words) : (i += 1) dst_words[i] = src[i];
+        while (i < words) : (i += 1) {
+            const val = src[i];
+            @as(*align(1) u32, @ptrCast(&dst[i * 4])).* = val;
+        }
     }
     var i = words * @sizeOf(u32);
     const tail: [*]const volatile u8 = @ptrCast(src_bytes.ptr);

@@ -95,4 +95,5 @@ test {
     _ = @import("prism/drivers/software/present_e2e_test.zig");
     // The software render benchmark (inert unless PRISM_BENCH is set).
     _ = @import("prism/drivers/software/bench.zig");
+    _ = @import("prism/platform/darwin.zig");
 }

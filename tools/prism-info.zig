@@ -77,30 +77,47 @@ fn printPlatforms(out: anytype, init: std.process.Init) !void {
     // headless: a pure allocator-backed framebuffer, always available.
     try out.print("  headless     available: yes\n", .{});
 
-    // wayland: probe the socket, and when reachable ask the compositor which DRM
-    // device it prefers + resolve that to a kernel driver name.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (prism.platform.wayland.resolveSocketPath(init.environ_map, &path_buf)) |sock| {
-        if (prism.platform.wayland.preferredDevice(gpa, io, sock)) |dev| {
-            var name_buf: [64]u8 = undefined;
-            if (prism.platform.drm.driverForDev(dev, &name_buf)) |kdriver| {
-                try out.print("  wayland      available: yes  (socket: {s}; compositor prefers driver '{s}')\n", .{ sock, kdriver });
+    if (comptime builtin.os.tag == .linux) {
+        // wayland: probe the socket, and when reachable ask the compositor which DRM
+        // device it prefers + resolve that to a kernel driver name.
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (prism.platform.wayland.resolveSocketPath(init.environ_map, &path_buf)) |sock| {
+            if (prism.platform.wayland.preferredDevice(gpa, io, sock)) |dev| {
+                var name_buf: [64]u8 = undefined;
+                if (prism.platform.drm.driverForDev(dev, &name_buf)) |kdriver| {
+                    try out.print("  wayland      available: yes  (socket: {s}; compositor prefers driver '{s}')\n", .{ sock, kdriver });
+                } else {
+                    try out.print("  wayland      available: yes  (socket: {s}; compositor prefers an unrecognized device)\n", .{sock});
+                }
             } else {
-                try out.print("  wayland      available: yes  (socket: {s}; compositor prefers an unrecognized device)\n", .{sock});
+                try out.print("  wayland      available: yes  (socket: {s})\n", .{sock});
             }
-        } else {
-            try out.print("  wayland      available: yes  (socket: {s})\n", .{sock});
+        } else |_| {
+            try out.print("  wayland      available: no   (WAYLAND_DISPLAY / XDG_RUNTIME_DIR unset)\n", .{});
         }
-    } else |_| {
-        try out.print("  wayland      available: no   (WAYLAND_DISPLAY / XDG_RUNTIME_DIR unset)\n", .{});
+
+        // drm: read-only scan of /dev/dri/card* (no SET_MASTER, no modeset).
+        try printDrm(out);
+
+        // virtio_gpu: the present backend is the freestanding Conduit path only; on a
+        // Linux host it is never usable directly.
+        try out.print("  virtio_gpu   available: no   (freestanding/baremetal only)\n", .{});
+    } else if (comptime builtin.os.tag.isDarwin()) {
+        // darwin: the WindowServer/SkyLight backend, loaded dynamically. Report
+        // whether the private framework and its required entry points resolve.
+        if (prism.platform.darwin.canLoadSkyLight()) {
+            try out.print("  darwin       available: yes  (SkyLight/WindowServer symbols resolved)\n", .{});
+        } else {
+            try out.print("  darwin       available: no   (SkyLight unavailable; software buffers only)\n", .{});
+        }
+        try out.print("  wayland      available: no   (Linux only)\n", .{});
+        try out.print("  drm          available: no   (Linux only)\n", .{});
+        try out.print("  virtio_gpu   available: no   (freestanding/baremetal only)\n", .{});
+    } else {
+        try out.print("  wayland      available: no   (Linux only)\n", .{});
+        try out.print("  drm          available: no   (Linux only)\n", .{});
+        try out.print("  virtio_gpu   available: no   (freestanding/baremetal only)\n", .{});
     }
-
-    // drm: read-only scan of /dev/dri/card* (no SET_MASTER, no modeset).
-    try printDrm(out);
-
-    // virtio_gpu: the present backend is the freestanding Conduit path only; on a
-    // Linux host it is never usable directly.
-    try out.print("  virtio_gpu   available: no   (freestanding/baremetal only)\n", .{});
 }
 
 /// List the DRM primary nodes that exist (/dev/dri/card0..card15), read-only. We

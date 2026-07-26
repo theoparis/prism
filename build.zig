@@ -85,6 +85,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulkan-zig", .module = vulkan_zig },
         },
     });
+
     if (enabled.contains("vulkan")) {
         // The Vulkan loader uses the platform C runtime internally. Declaring
         // libc here ensures Zig executables importing prism use the libc-aware
@@ -156,7 +157,7 @@ pub fn build(b: *std.Build) void {
     // prism-info probes hardware through the platform backends, and the Wayland
     // one pulls the wayland client's Linux-only syscall layer into analysis on
     // darwin. The tool has no darwin consumer: lattice uses the prism module.
-    if (target.result.os.tag == .linux and !target.result.abi.isAndroid()) {
+    if ((target.result.os.tag == .linux and !target.result.abi.isAndroid()) or target.result.os.tag.isDarwin()) {
         const info_mod = b.createModule(.{
             .root_source_file = b.path("tools/prism-info.zig"),
             .target = target,
