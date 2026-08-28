@@ -982,6 +982,10 @@ pub fn glFlush() callconv(.c) void {
 pub fn glGenBuffers(n: gles.GLsizei, buffers: ?[*]gles.GLuint) callconv(.c) void {
     gles.genBuffers(n, buffers);
 }
+// GL_ARB_vertex_buffer_object alias (legacy loaders resolve the ARB name).
+pub fn glGenBuffersARB(n: gles.GLsizei, buffers: ?[*]gles.GLuint) callconv(.c) void {
+    gles.genBuffers(n, buffers);
+}
 pub fn glBindBuffer(target: gles.GLenum, buffer: gles.GLuint) callconv(.c) void {
     gles.bindBuffer(target, buffer);
 }
@@ -1518,6 +1522,7 @@ fn lookupProc(name: []const u8) egl.ProcFn {
         .{ "glFlush", asProc(glFlush) },
         // The GLES2 triangle path (shaders + programs + buffers + attribs + draw).
         .{ "glGenBuffers", asProc(glGenBuffers) },
+        .{ "glGenBuffersARB", asProc(glGenBuffersARB) },
         .{ "glBindBuffer", asProc(glBindBuffer) },
         .{ "glBufferData", asProc(glBufferData) },
         .{ "glDeleteBuffers", asProc(glDeleteBuffers) },
@@ -1662,6 +1667,42 @@ fn lookupProc(name: []const u8) egl.ProcFn {
         .{ "glFlushMappedBufferRange", asProc(glFlushMappedBufferRange) },
         .{ "glDrawRangeElements", asProc(glDrawRangeElements) },
         .{ "glUnmapBufferOES", asProc(glUnmapBufferOES) },
+        // Legacy GL1.x / GLES1 fixed-function pipeline.
+        .{ "glMatrixMode", asProc(glMatrixMode) },
+        .{ "glLoadIdentity", asProc(glLoadIdentity) },
+        .{ "glLoadMatrixf", asProc(glLoadMatrixf) },
+        .{ "glMultMatrixf", asProc(glMultMatrixf) },
+        .{ "glPushMatrix", asProc(glPushMatrix) },
+        .{ "glPopMatrix", asProc(glPopMatrix) },
+        .{ "glTranslatef", asProc(glTranslatef) },
+        .{ "glScalef", asProc(glScalef) },
+        .{ "glRotatef", asProc(glRotatef) },
+        .{ "glOrtho", asProc(glOrtho) },
+        .{ "glOrthof", asProc(glOrthof) },
+        .{ "glFrustum", asProc(glFrustum) },
+        .{ "glFrustumf", asProc(glFrustumf) },
+        .{ "glColor4f", asProc(glColor4f) },
+        .{ "glColor3f", asProc(glColor3f) },
+        .{ "glNormal3f", asProc(glNormal3f) },
+        .{ "glShadeModel", asProc(glShadeModel) },
+        .{ "glAlphaFunc", asProc(glAlphaFunc) },
+        .{ "glFogf", asProc(glFogf) },
+        .{ "glFogfv", asProc(glFogfv) },
+        .{ "glLightfv", asProc(glLightfv) },
+        .{ "glLightModelfv", asProc(glLightModelfv) },
+        .{ "glMaterialfv", asProc(glMaterialfv) },
+        .{ "glTexGeni", asProc(glTexGeni) },
+        .{ "glMultiTexCoord4f", asProc(glMultiTexCoord4f) },
+        .{ "glEnableClientState", asProc(glEnableClientState) },
+        .{ "glDisableClientState", asProc(glDisableClientState) },
+        .{ "glVertexPointer", asProc(glVertexPointer) },
+        .{ "glColorPointer", asProc(glColorPointer) },
+        .{ "glTexCoordPointer", asProc(glTexCoordPointer) },
+        .{ "glGenLists", asProc(glGenLists) },
+        .{ "glNewList", asProc(glNewList) },
+        .{ "glEndList", asProc(glEndList) },
+        .{ "glCallList", asProc(glCallList) },
+        .{ "glDeleteLists", asProc(glDeleteLists) },
     };
     inline for (map) |entry| {
         if (std.mem.eql(u8, name, entry[0])) return entry[1];
@@ -1758,6 +1799,119 @@ pub fn eglMain(
     api_exports = exports;
     fillImports(imp);
     return egl.EGL_TRUE;
+}
+
+// ===========================================================================
+// Legacy GL1.x / GLES1 fixed-function entry points (C ABI). These forward to the
+// real fixed-function implementation in gles.zig (matrix stack, client arrays,
+// current color/normal/fog/alpha, display lists). See the fixed-function draw
+// pipeline note in gles.zig.
+// ===========================================================================
+
+pub fn glMatrixMode(mode: gles.GLenum) callconv(.c) void {
+    gles.matrixMode(mode);
+}
+pub fn glLoadIdentity() callconv(.c) void {
+    gles.loadIdentity();
+}
+pub fn glLoadMatrixf(m: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.loadMatrixf(m);
+}
+pub fn glMultMatrixf(m: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.multMatrixf(m);
+}
+pub fn glPushMatrix() callconv(.c) void {
+    gles.pushMatrix();
+}
+pub fn glPopMatrix() callconv(.c) void {
+    gles.popMatrix();
+}
+pub fn glTranslatef(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    gles.translatef(x, y, z);
+}
+pub fn glScalef(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    gles.scalef(x, y, z);
+}
+pub fn glRotatef(angle: gles.GLfloat, x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    gles.rotatef(angle, x, y, z);
+}
+pub fn glOrtho(l: gles.GLdouble, r: gles.GLdouble, b: gles.GLdouble, t: gles.GLdouble, n: gles.GLdouble, f: gles.GLdouble) callconv(.c) void {
+    gles.ortho(l, r, b, t, n, f);
+}
+pub fn glOrthof(l: gles.GLfloat, r: gles.GLfloat, b: gles.GLfloat, t: gles.GLfloat, n: gles.GLfloat, f: gles.GLfloat) callconv(.c) void {
+    gles.ortho(l, r, b, t, n, f);
+}
+pub fn glFrustum(l: gles.GLdouble, r: gles.GLdouble, b: gles.GLdouble, t: gles.GLdouble, n: gles.GLdouble, f: gles.GLdouble) callconv(.c) void {
+    gles.frustum(l, r, b, t, n, f);
+}
+pub fn glFrustumf(l: gles.GLfloat, r: gles.GLfloat, b: gles.GLfloat, t: gles.GLfloat, n: gles.GLfloat, f: gles.GLfloat) callconv(.c) void {
+    gles.frustum(l, r, b, t, n, f);
+}
+pub fn glColor4f(r: gles.GLfloat, g: gles.GLfloat, b: gles.GLfloat, a: gles.GLfloat) callconv(.c) void {
+    gles.color4f(r, g, b, a);
+}
+pub fn glColor3f(r: gles.GLfloat, g: gles.GLfloat, b: gles.GLfloat) callconv(.c) void {
+    gles.color3f(r, g, b);
+}
+pub fn glNormal3f(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    gles.normal3f(x, y, z);
+}
+pub fn glShadeModel(mode: gles.GLenum) callconv(.c) void {
+    gles.shadeModel(mode);
+}
+pub fn glAlphaFunc(func: gles.GLenum, ref: gles.GLfloat) callconv(.c) void {
+    gles.alphaFunc(func, ref);
+}
+pub fn glFogf(pname: gles.GLenum, param: gles.GLfloat) callconv(.c) void {
+    gles.fogf(pname, param);
+}
+pub fn glFogfv(pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.fogfv(pname, params);
+}
+pub fn glLightfv(light: gles.GLenum, pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.lightfv(light, pname, params);
+}
+pub fn glLightModelfv(pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.lightModelfv(pname, params);
+}
+pub fn glMaterialfv(face: gles.GLenum, pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    gles.materialfv(face, pname, params);
+}
+pub fn glTexGeni(coord: gles.GLenum, pname: gles.GLenum, param: gles.GLint) callconv(.c) void {
+    gles.texGeni(coord, pname, param);
+}
+pub fn glMultiTexCoord4f(target: gles.GLenum, s: gles.GLfloat, t: gles.GLfloat, r: gles.GLfloat, q: gles.GLfloat) callconv(.c) void {
+    gles.multiTexCoord4f(target, s, t, r, q);
+}
+pub fn glEnableClientState(cap: gles.GLenum) callconv(.c) void {
+    gles.enableClientState(cap);
+}
+pub fn glDisableClientState(cap: gles.GLenum) callconv(.c) void {
+    gles.disableClientState(cap);
+}
+pub fn glVertexPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    gles.vertexPointer(size, gl_type, stride, pointer);
+}
+pub fn glColorPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    gles.colorPointer(size, gl_type, stride, pointer);
+}
+pub fn glTexCoordPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    gles.texCoordPointer(size, gl_type, stride, pointer);
+}
+pub fn glGenLists(range: gles.GLsizei) callconv(.c) gles.GLuint {
+    return gles.genLists(range);
+}
+pub fn glNewList(list: gles.GLuint, mode: gles.GLenum) callconv(.c) void {
+    gles.newList(list, mode);
+}
+pub fn glEndList() callconv(.c) void {
+    gles.endList();
+}
+pub fn glCallList(list: gles.GLuint) callconv(.c) void {
+    gles.callList(list);
+}
+pub fn glDeleteLists(list: gles.GLuint, range: gles.GLsizei) callconv(.c) void {
+    gles.deleteLists(list, range);
 }
 
 // Tests

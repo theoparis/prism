@@ -191,6 +191,9 @@ export fn glFlush() callconv(.c) void {
 }
 
 // GLES2 triangle path (shaders + programs + buffers + attribs + draw)
+export fn glGenBuffersARB(n: gles.GLsizei, buffers: ?[*]gles.GLuint) callconv(.c) void {
+    return vendor.glGenBuffersARB(n, buffers);
+}
 export fn glGenBuffers(n: gles.GLsizei, buffers: ?[*]gles.GLuint) callconv(.c) void {
     return vendor.glGenBuffers(n, buffers);
 }
@@ -366,6 +369,143 @@ export fn glPixelStorei(pname: gles.GLenum, param: gles.GLint) callconv(.c) void
 }
 export fn glGenerateMipmap(target: gles.GLenum) callconv(.c) void {
     return vendor.glGenerateMipmap(target);
+}
+
+// GLES2 state setters previously reachable only via eglGetProcAddress; exported so a
+// direct-linking consumer (LCE) resolves them at link time.
+export fn glLineWidth(w: gles.GLfloat) callconv(.c) void {
+    return vendor.glLineWidth(w);
+}
+export fn glGetFloatv(pname: gles.GLenum, params: ?[*]gles.GLfloat) callconv(.c) void {
+    return vendor.glGetFloatv(pname, params);
+}
+export fn glPolygonOffset(factor: gles.GLfloat, units: gles.GLfloat) callconv(.c) void {
+    return vendor.glPolygonOffset(factor, units);
+}
+export fn glStencilFunc(func: gles.GLenum, ref: gles.GLint, mask: gles.GLuint) callconv(.c) void {
+    return vendor.glStencilFunc(func, ref, mask);
+}
+export fn glStencilOp(sfail: gles.GLenum, dpfail: gles.GLenum, dppass: gles.GLenum) callconv(.c) void {
+    return vendor.glStencilOp(sfail, dpfail, dppass);
+}
+export fn glStencilMask(mask: gles.GLuint) callconv(.c) void {
+    return vendor.glStencilMask(mask);
+}
+export fn glBlendFunc(sfactor: gles.GLenum, dfactor: gles.GLenum) callconv(.c) void {
+    return vendor.glBlendFunc(sfactor, dfactor);
+}
+export fn glColorMask(r: gles.GLboolean, g: gles.GLboolean, b: gles.GLboolean, a: gles.GLboolean) callconv(.c) void {
+    return vendor.glColorMask(r, g, b, a);
+}
+export fn glReadPixels(x: gles.GLint, y: gles.GLint, width: gles.GLsizei, height: gles.GLsizei, format: gles.GLenum, gl_type: gles.GLenum, pixels: ?*anyopaque) callconv(.c) void {
+    return vendor.glReadPixels(x, y, width, height, format, gl_type, pixels);
+}
+
+// Legacy GL1.x / GLES1 fixed-function pipeline (direct-dlsym path).
+export fn glMatrixMode(mode: gles.GLenum) callconv(.c) void {
+    return vendor.glMatrixMode(mode);
+}
+export fn glLoadIdentity() callconv(.c) void {
+    return vendor.glLoadIdentity();
+}
+export fn glLoadMatrixf(m: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glLoadMatrixf(m);
+}
+export fn glMultMatrixf(m: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glMultMatrixf(m);
+}
+export fn glPushMatrix() callconv(.c) void {
+    return vendor.glPushMatrix();
+}
+export fn glPopMatrix() callconv(.c) void {
+    return vendor.glPopMatrix();
+}
+export fn glTranslatef(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    return vendor.glTranslatef(x, y, z);
+}
+export fn glScalef(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    return vendor.glScalef(x, y, z);
+}
+export fn glRotatef(angle: gles.GLfloat, x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    return vendor.glRotatef(angle, x, y, z);
+}
+export fn glOrtho(l: gles.GLdouble, r: gles.GLdouble, b: gles.GLdouble, t: gles.GLdouble, n: gles.GLdouble, f: gles.GLdouble) callconv(.c) void {
+    return vendor.glOrtho(l, r, b, t, n, f);
+}
+export fn glOrthof(l: gles.GLfloat, r: gles.GLfloat, b: gles.GLfloat, t: gles.GLfloat, n: gles.GLfloat, f: gles.GLfloat) callconv(.c) void {
+    return vendor.glOrthof(l, r, b, t, n, f);
+}
+export fn glFrustum(l: gles.GLdouble, r: gles.GLdouble, b: gles.GLdouble, t: gles.GLdouble, n: gles.GLdouble, f: gles.GLdouble) callconv(.c) void {
+    return vendor.glFrustum(l, r, b, t, n, f);
+}
+export fn glFrustumf(l: gles.GLfloat, r: gles.GLfloat, b: gles.GLfloat, t: gles.GLfloat, n: gles.GLfloat, f: gles.GLfloat) callconv(.c) void {
+    return vendor.glFrustumf(l, r, b, t, n, f);
+}
+export fn glColor4f(r: gles.GLfloat, g: gles.GLfloat, b: gles.GLfloat, a: gles.GLfloat) callconv(.c) void {
+    return vendor.glColor4f(r, g, b, a);
+}
+export fn glColor3f(r: gles.GLfloat, g: gles.GLfloat, b: gles.GLfloat) callconv(.c) void {
+    return vendor.glColor3f(r, g, b);
+}
+export fn glNormal3f(x: gles.GLfloat, y: gles.GLfloat, z: gles.GLfloat) callconv(.c) void {
+    return vendor.glNormal3f(x, y, z);
+}
+export fn glShadeModel(mode: gles.GLenum) callconv(.c) void {
+    return vendor.glShadeModel(mode);
+}
+export fn glAlphaFunc(func: gles.GLenum, ref: gles.GLfloat) callconv(.c) void {
+    return vendor.glAlphaFunc(func, ref);
+}
+export fn glFogf(pname: gles.GLenum, param: gles.GLfloat) callconv(.c) void {
+    return vendor.glFogf(pname, param);
+}
+export fn glFogfv(pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glFogfv(pname, params);
+}
+export fn glLightfv(light: gles.GLenum, pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glLightfv(light, pname, params);
+}
+export fn glLightModelfv(pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glLightModelfv(pname, params);
+}
+export fn glMaterialfv(face: gles.GLenum, pname: gles.GLenum, params: ?[*]const gles.GLfloat) callconv(.c) void {
+    return vendor.glMaterialfv(face, pname, params);
+}
+export fn glTexGeni(coord: gles.GLenum, pname: gles.GLenum, param: gles.GLint) callconv(.c) void {
+    return vendor.glTexGeni(coord, pname, param);
+}
+export fn glMultiTexCoord4f(target: gles.GLenum, s: gles.GLfloat, t: gles.GLfloat, r: gles.GLfloat, q: gles.GLfloat) callconv(.c) void {
+    return vendor.glMultiTexCoord4f(target, s, t, r, q);
+}
+export fn glEnableClientState(cap: gles.GLenum) callconv(.c) void {
+    return vendor.glEnableClientState(cap);
+}
+export fn glDisableClientState(cap: gles.GLenum) callconv(.c) void {
+    return vendor.glDisableClientState(cap);
+}
+export fn glVertexPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    return vendor.glVertexPointer(size, gl_type, stride, pointer);
+}
+export fn glColorPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    return vendor.glColorPointer(size, gl_type, stride, pointer);
+}
+export fn glTexCoordPointer(size: gles.GLint, gl_type: gles.GLenum, stride: gles.GLsizei, pointer: ?*const anyopaque) callconv(.c) void {
+    return vendor.glTexCoordPointer(size, gl_type, stride, pointer);
+}
+export fn glGenLists(range: gles.GLsizei) callconv(.c) gles.GLuint {
+    return vendor.glGenLists(range);
+}
+export fn glNewList(list: gles.GLuint, mode: gles.GLenum) callconv(.c) void {
+    return vendor.glNewList(list, mode);
+}
+export fn glEndList() callconv(.c) void {
+    return vendor.glEndList();
+}
+export fn glCallList(list: gles.GLuint) callconv(.c) void {
+    return vendor.glCallList(list);
+}
+export fn glDeleteLists(list: gles.GLuint, range: gles.GLsizei) callconv(.c) void {
+    return vendor.glDeleteLists(list, range);
 }
 
 test "core reachable from egl frontend" {

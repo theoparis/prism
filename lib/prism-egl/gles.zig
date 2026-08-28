@@ -27,6 +27,7 @@ pub const GLclampf = f32;
 pub const GLfloat = f32;
 pub const GLubyte = u8;
 pub const GLchar = u8;
+pub const GLdouble = f64;
 pub const GLboolean = u8;
 
 // --- GL constants -----------------------------------------------------------
@@ -794,6 +795,11 @@ fn setCap(cap: GLenum, on: bool) void {
         GL_SAMPLE_ALPHA_TO_COVERAGE => fixed.sample_alpha_to_coverage = on,
         GL_SAMPLE_COVERAGE => fixed.sample_coverage = on,
         GL_RASTERIZER_DISCARD => fixed.rasterizer_discard = on,
+        // Legacy GLES1 fixed-function caps, honored by the fixed-function draw path.
+        GL_TEXTURE_2D => ff_texture_2d = on,
+        GL_ALPHA_TEST => ff_alpha_test = on,
+        GL_FOG => ff_fog = on,
+        GL_LIGHTING => ff_lighting = on,
         GL_DITHER,
         => {}, // accepted, not yet modeled (no-op with correct semantics for es2gears)
         else => setError(GL_INVALID_ENUM),
@@ -8681,7 +8687,7 @@ fn genMipLevel(map: []u8, base: usize, w: u32, h: u32, level: u8, bpp: u32) void
 /// buildArrayIndices, so the pipeline only ever sees list topologies). null = invalid mode.
 fn modeTopology(mode: GLenum) ?prism.hal.Topology {
     return switch (mode) {
-        GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN => .triangle_list,
+        GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_QUADS, GL_QUAD_STRIP, GL_POLYGON => .triangle_list,
         GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP => .line_list,
         GL_POINTS => .point_list,
         else => null,
@@ -8748,13 +8754,37 @@ fn buildArrayIndices(mode: GLenum, first: u32, count: u32, out: *std.ArrayListUn
                 }
             }
         },
-        GL_TRIANGLE_FAN => {
-            // v0,v1,v2 ; v0,v2,v3 ; ...
+        GL_TRIANGLE_FAN, GL_POLYGON => {
+            // v0,v1,v2 ; v0,v2,v3 ; ... (GL_POLYGON, a convex polygon, expands identically).
             var i: u32 = 1;
             while (i + 1 < count) : (i += 1) {
                 out.append(gpa, first) catch return null;
                 out.append(gpa, first + i) catch return null;
                 out.append(gpa, first + i + 1) catch return null;
+            }
+        },
+        GL_QUADS => {
+            // Legacy quads: each group of 4 verts -> 2 tris (0,1,2)(0,2,3).
+            var i: u32 = 0;
+            while (i + 4 <= count) : (i += 4) {
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 1) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+            }
+        },
+        GL_QUAD_STRIP => {
+            // Quad strip: quad k uses verts 2k,2k+1,2k+3,2k+2 -> tris (2k,2k+1,2k+3)(2k,2k+3,2k+2).
+            var i: u32 = 0;
+            while (i + 4 <= count) : (i += 2) {
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 1) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
             }
         },
         else => {
@@ -8778,6 +8808,15 @@ pub fn drawArrays(mode: GLenum, first: GLint, count: GLsizei) void {
         return;
     }
     if (count == 0) return;
+    if (fixedFunctionActive()) {
+        const saved = beginFixedFunction() orelse return;
+        defer endFixedFunction(saved);
+        const nff = buildArrayIndices(mode, @intCast(first), @intCast(count), &draw_indices) orelse return;
+        if (nff == 0) return;
+        draw_topology = modeTopology(mode) orelse .triangle_list;
+        drawTriangleList(draw_indices.items[0..nff]);
+        return;
+    }
     const n = buildArrayIndices(mode, @intCast(first), @intCast(count), &draw_indices) orelse return;
     if (n == 0) return;
     draw_topology = modeTopology(mode) orelse .triangle_list;
@@ -8820,6 +8859,11 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
         setError(GL_INVALID_ENUM); // reject an unknown primitive mode before the expansion switch
         return;
     }
+    var ff_saved: ?SavedAttribs = null;
+    if (fixedFunctionActive() and instancecount == 1) {
+        ff_saved = beginFixedFunction() orelse return;
+    }
+    defer if (ff_saved) |s| endFixedFunction(s);
     const elem_size: usize = switch (index_type) {
         GL_UNSIGNED_BYTE => 1,
         GL_UNSIGNED_SHORT => 2,
@@ -8829,7 +8873,9 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
             return;
         },
     };
-    if (mode != GL_TRIANGLES and mode != GL_TRIANGLE_STRIP and mode != GL_TRIANGLE_FAN) {
+    if (mode != GL_TRIANGLES and mode != GL_TRIANGLE_STRIP and mode != GL_TRIANGLE_FAN and
+        mode != GL_QUADS and mode != GL_QUAD_STRIP and mode != GL_POLYGON)
+    {
         setError(GL_INVALID_ENUM);
         return;
     }
@@ -8910,7 +8956,29 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
             for (r) |v| draw_indices.append(gpa, v) catch return;
         },
         GL_TRIANGLE_STRIP => forEachRestartRun(r, index_type, expandStripRun),
-        GL_TRIANGLE_FAN => forEachRestartRun(r, index_type, expandFanRun),
+        GL_TRIANGLE_FAN, GL_POLYGON => forEachRestartRun(r, index_type, expandFanRun),
+        GL_QUADS => {
+            var k: usize = 0;
+            while (k + 4 <= r.len) : (k += 4) {
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 1]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+            }
+        },
+        GL_QUAD_STRIP => {
+            var k: usize = 0;
+            while (k + 4 <= r.len) : (k += 2) {
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 1]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+            }
+        },
         else => unreachable,
     }
     drawTriangleListInstanced(draw_indices.items, @intCast(instancecount));
@@ -8968,6 +9036,608 @@ fn expandFanRun(run: []const u32) void {
         draw_indices.append(gpa, run[0]) catch return;
         draw_indices.append(gpa, run[k]) catch return;
         draw_indices.append(gpa, run[k + 1]) catch return;
+    }
+}
+
+// GLES1 / legacy GL 1.x fixed-function compatibility 
+pub const GL_MODELVIEW: GLenum = 0x1700;
+pub const GL_PROJECTION: GLenum = 0x1701;
+
+pub const GL_FLAT: GLenum = 0x1D00;
+pub const GL_SMOOTH: GLenum = 0x1D01;
+
+pub const GL_FOG: GLenum = 0x0B60;
+pub const GL_FOG_MODE: GLenum = 0x0B65;
+pub const GL_FOG_DENSITY: GLenum = 0x0B62;
+pub const GL_FOG_START: GLenum = 0x0B63;
+pub const GL_FOG_END: GLenum = 0x0B64;
+pub const GL_FOG_COLOR: GLenum = 0x0B66;
+pub const GL_EXP: GLenum = 0x0800;
+pub const GL_EXP2: GLenum = 0x0801;
+
+pub const GL_LIGHT0: GLenum = 0x4000;
+pub const GL_LIGHT1: GLenum = 0x4001;
+pub const GL_LIGHTING: GLenum = 0x0B50;
+pub const GL_AMBIENT: GLenum = 0x1200;
+pub const GL_DIFFUSE: GLenum = 0x1201;
+pub const GL_SPECULAR: GLenum = 0x1202;
+pub const GL_POSITION: GLenum = 0x1203;
+pub const GL_AMBIENT_AND_DIFFUSE: GLenum = 0x1602;
+pub const GL_EMISSION: GLenum = 0x1600;
+pub const GL_SHININESS: GLenum = 0x1601;
+
+pub const GL_VERTEX_ARRAY: GLenum = 0x8074;
+pub const GL_NORMAL_ARRAY: GLenum = 0x8075;
+pub const GL_COLOR_ARRAY: GLenum = 0x8076;
+pub const GL_TEXTURE_COORD_ARRAY: GLenum = 0x8078;
+
+pub const GL_TEXTURE_GEN_S: GLenum = 0x0C60;
+pub const GL_TEXTURE_GEN_T: GLenum = 0x0C61;
+pub const GL_TEXTURE_GEN_MODE: GLenum = 0x2500;
+
+pub const GL_COMPILE: GLenum = 0x1300;
+pub const GL_COMPILE_AND_EXECUTE: GLenum = 0x1301;
+
+pub const GL_QUADS: GLenum = 0x0007;
+pub const GL_QUAD_STRIP: GLenum = 0x0008;
+pub const GL_POLYGON: GLenum = 0x0009;
+pub const GL_ALPHA_TEST: GLenum = 0x0BC0;
+
+/// A column-major 4x4 float matrix, GL layout (m[col*4+row]).
+pub const Mat4 = [16]f32;
+
+pub const mat4_identity: Mat4 = .{
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+};
+
+fn mat4Mul(a: Mat4, b: Mat4) Mat4 {
+    var r: Mat4 = undefined;
+    var col: usize = 0;
+    while (col < 4) : (col += 1) {
+        var row: usize = 0;
+        while (row < 4) : (row += 1) {
+            var sum: f32 = 0;
+            var k: usize = 0;
+            while (k < 4) : (k += 1) sum += a[k * 4 + row] * b[col * 4 + k];
+            r[col * 4 + row] = sum;
+        }
+    }
+    return r;
+}
+
+const MAX_MATRIX_STACK_DEPTH = 32;
+const MatrixStack = struct {
+    stack: [MAX_MATRIX_STACK_DEPTH]Mat4 = [_]Mat4{mat4_identity} ** MAX_MATRIX_STACK_DEPTH,
+    top: usize = 0,
+
+    fn current(self: *MatrixStack) *Mat4 {
+        return &self.stack[self.top];
+    }
+
+    fn push(self: *MatrixStack) void {
+        if (self.top + 1 >= MAX_MATRIX_STACK_DEPTH) return; // GL_STACK_OVERFLOW: silently clamp
+        self.stack[self.top + 1] = self.stack[self.top];
+        self.top += 1;
+    }
+
+    fn pop(self: *MatrixStack) void {
+        if (self.top == 0) return; // GL_STACK_UNDERFLOW: silently clamp
+        self.top -= 1;
+    }
+};
+
+threadlocal var mv_stack: MatrixStack = .{};
+threadlocal var proj_stack: MatrixStack = .{};
+threadlocal var tex_stack: MatrixStack = .{};
+threadlocal var matrix_mode: GLenum = GL_MODELVIEW;
+
+fn activeStack() *MatrixStack {
+    return switch (matrix_mode) {
+        GL_PROJECTION => &proj_stack,
+        GL_TEXTURE => &tex_stack,
+        else => &mv_stack,
+    };
+}
+
+pub fn matrixMode(mode: GLenum) void {
+    matrix_mode = mode;
+}
+
+pub fn loadIdentity() void {
+    activeStack().current().* = mat4_identity;
+}
+
+pub fn loadMatrixf(m: ?[*]const GLfloat) void {
+    const mp = m orelse return;
+    activeStack().current().* = mp[0..16].*;
+}
+
+pub fn multMatrixf(m: ?[*]const GLfloat) void {
+    const mp = m orelse return;
+    const cur = activeStack().current();
+    cur.* = mat4Mul(cur.*, mp[0..16].*);
+}
+
+pub fn pushMatrix() void {
+    activeStack().push();
+}
+
+pub fn popMatrix() void {
+    activeStack().pop();
+}
+
+pub fn translatef(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    var t = mat4_identity;
+    t[12] = x;
+    t[13] = y;
+    t[14] = z;
+    multMatrixf(&t);
+}
+
+pub fn scalef(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    var s = mat4_identity;
+    s[0] = x;
+    s[5] = y;
+    s[10] = z;
+    multMatrixf(&s);
+}
+
+pub fn rotatef(angle_deg: GLfloat, x: GLfloat, y: GLfloat, z: GLfloat) void {
+    const len2 = x * x + y * y + z * z;
+    if (len2 <= 0) return;
+    const inv_len = 1.0 / @sqrt(len2);
+    const ax = x * inv_len;
+    const ay = y * inv_len;
+    const az = z * inv_len;
+    const rad = angle_deg * (std.math.pi / 180.0);
+    const c = @cos(rad);
+    const s = @sin(rad);
+    const t = 1.0 - c;
+    var r = mat4_identity;
+    r[0] = t * ax * ax + c;
+    r[1] = t * ax * ay + s * az;
+    r[2] = t * ax * az - s * ay;
+    r[4] = t * ax * ay - s * az;
+    r[5] = t * ay * ay + c;
+    r[6] = t * ay * az + s * ax;
+    r[8] = t * ax * az + s * ay;
+    r[9] = t * ay * az - s * ax;
+    r[10] = t * az * az + c;
+    multMatrixf(&r);
+}
+
+pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, z_near: f64, z_far: f64) void {
+    var m = mat4_identity;
+    const rl = right - left;
+    const tb = top - bottom;
+    const fn_ = z_far - z_near;
+    m[0] = @floatCast(2.0 / rl);
+    m[5] = @floatCast(2.0 / tb);
+    m[10] = @floatCast(-2.0 / fn_);
+    m[12] = @floatCast(-(right + left) / rl);
+    m[13] = @floatCast(-(top + bottom) / tb);
+    m[14] = @floatCast(-(z_far + z_near) / fn_);
+    multMatrixf(&m);
+}
+
+pub fn frustum(left: f64, right: f64, bottom: f64, top: f64, z_near: f64, z_far: f64) void {
+    var m = [_]f32{0} ** 16;
+    const rl = right - left;
+    const tb = top - bottom;
+    const fn_ = z_far - z_near;
+    m[0] = @floatCast(2.0 * z_near / rl);
+    m[5] = @floatCast(2.0 * z_near / tb);
+    m[8] = @floatCast((right + left) / rl);
+    m[9] = @floatCast((top + bottom) / tb);
+    m[10] = @floatCast(-(z_far + z_near) / fn_);
+    m[11] = -1;
+    m[14] = @floatCast(-(2.0 * z_far * z_near) / fn_);
+    multMatrixf(&m);
+}
+
+/// Current color (glColor4f/glColor3f), fog/light/material parameters, shade model, and
+/// legacy client-side vertex-array pointers. Storage only - see the shim note above.
+threadlocal var current_color: [4]f32 = .{ 1, 1, 1, 1 };
+threadlocal var current_normal: [3]f32 = .{ 0, 0, 1 };
+threadlocal var shade_model: GLenum = GL_SMOOTH;
+threadlocal var alpha_func: GLenum = GL_ALWAYS;
+threadlocal var alpha_ref: GLfloat = 0;
+threadlocal var fog_mode: GLenum = GL_EXP;
+threadlocal var fog_density: GLfloat = 1.0;
+threadlocal var fog_start: GLfloat = 0;
+threadlocal var fog_end: GLfloat = 1;
+threadlocal var fog_color: [4]f32 = .{ 0, 0, 0, 0 };
+
+// Legacy GLES1 fixed-function enable flags (glEnable/glDisable), consumed by the
+// fixed-function draw path to select shader features and uniforms.
+threadlocal var ff_texture_2d: bool = false;
+threadlocal var ff_alpha_test: bool = false;
+threadlocal var ff_fog: bool = false;
+threadlocal var ff_lighting: bool = false;
+// The current glMultiTexCoord4f value used when GL_TEXTURE_COORD_ARRAY is disabled.
+threadlocal var current_texcoord: [4]f32 = .{ 0, 0, 0, 1 };
+
+pub fn color4f(r: GLfloat, g: GLfloat, b: GLfloat, a: GLfloat) void {
+    current_color = .{ r, g, b, a };
+}
+pub fn color3f(r: GLfloat, g: GLfloat, b: GLfloat) void {
+    current_color = .{ r, g, b, 1 };
+}
+pub fn normal3f(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    current_normal = .{ x, y, z };
+}
+pub fn shadeModel(mode: GLenum) void {
+    shade_model = mode;
+}
+pub fn alphaFunc(func: GLenum, ref: GLfloat) void {
+    alpha_func = func;
+    alpha_ref = ref;
+}
+pub fn fogf(pname: GLenum, param: GLfloat) void {
+    switch (pname) {
+        GL_FOG_MODE => fog_mode = @intFromFloat(param),
+        GL_FOG_DENSITY => fog_density = param,
+        GL_FOG_START => fog_start = param,
+        GL_FOG_END => fog_end = param,
+        else => {},
+    }
+}
+pub fn fogfv(pname: GLenum, params: ?[*]const GLfloat) void {
+    const p = params orelse return;
+    switch (pname) {
+        GL_FOG_COLOR => fog_color = p[0..4].*,
+        else => {},
+    }
+}
+/// glLightfv/glLightModelfv/glMaterialfv/glTexGeni: legacy per-light/material/texgen state.
+/// Storage-only (see shim note above) - accepted so callers link and don't crash.
+pub fn lightfv(light: GLenum, pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = light;
+    _ = pname;
+    _ = params;
+}
+pub fn lightModelfv(pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = pname;
+    _ = params;
+}
+pub fn materialfv(face: GLenum, pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = face;
+    _ = pname;
+    _ = params;
+}
+pub fn texGeni(coord: GLenum, pname: GLenum, param: GLint) void {
+    _ = coord;
+    _ = pname;
+    _ = param;
+}
+
+/// Legacy client-side vertex array pointers (glVertexPointer/glColorPointer/
+/// glTexCoordPointer) + enable flags (glEnableClientState/glDisableClientState). Storage
+/// only: Prism's draw path is GLES2 vertex-attrib-array based (see attribs above); a caller
+/// driving geometry purely through these legacy arrays + glDrawArrays/glDrawElements without
+/// its own shader does not get fixed-function transform+lighting from Prism.
+const ClientArray = struct {
+    enabled: bool = false,
+    size: GLint = 4,
+    gl_type: GLenum = GL_FLOAT,
+    stride: GLsizei = 0,
+    pointer: ?*const anyopaque = null,
+};
+threadlocal var client_vertex: ClientArray = .{};
+threadlocal var client_color: ClientArray = .{};
+threadlocal var client_texcoord: ClientArray = .{};
+threadlocal var client_normal: ClientArray = .{};
+
+pub fn enableClientState(cap: GLenum) void {
+    switch (cap) {
+        GL_VERTEX_ARRAY => client_vertex.enabled = true,
+        GL_COLOR_ARRAY => client_color.enabled = true,
+        GL_TEXTURE_COORD_ARRAY => client_texcoord.enabled = true,
+        GL_NORMAL_ARRAY => client_normal.enabled = true,
+        else => {},
+    }
+}
+pub fn disableClientState(cap: GLenum) void {
+    switch (cap) {
+        GL_VERTEX_ARRAY => client_vertex.enabled = false,
+        GL_COLOR_ARRAY => client_color.enabled = false,
+        GL_TEXTURE_COORD_ARRAY => client_texcoord.enabled = false,
+        GL_NORMAL_ARRAY => client_normal.enabled = false,
+        else => {},
+    }
+}
+pub fn vertexPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    client_vertex = .{ .enabled = client_vertex.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer };
+}
+pub fn colorPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    client_color = .{ .enabled = client_color.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer };
+}
+pub fn texCoordPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    client_texcoord = .{ .enabled = client_texcoord.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer };
+}
+pub fn multiTexCoord4f(target: GLenum, s: GLfloat, t: GLfloat, r: GLfloat, q: GLfloat) void {
+    _ = target; // single texture unit modeled
+    current_texcoord = .{ s, t, r, q };
+}
+
+// ===========================================================================
+// Fixed-function draw pipeline (real GLES1 -> GLES2 translation)
+//
+// A caller that drives geometry through the legacy client arrays + matrix stack
+// (glVertexPointer/glColorPointer/glTexCoordPointer + glDrawArrays, no user
+// shader bound) gets a genuine transformed + textured + fog/alpha-tested draw:
+// on such a draw we lazily compile a GLES2 program that reproduces the classic
+// GL1.x pipeline (MVP transform, per-vertex color modulate, single 2D texture,
+// linear/exp/exp2 fog, alpha test), bind the legacy client arrays as its vertex
+// attributes, upload the matrix stack + fixed state as uniforms, and route the
+// draw through the normal GLES2 HAL path (drawTriangleList).
+// ===========================================================================
+
+// Fixed attribute locations for the fixed-function program.
+const FF_LOC_POS: GLuint = 0;
+const FF_LOC_COLOR: GLuint = 1;
+const FF_LOC_TEXCOORD: GLuint = 2;
+
+const ff_vs_src: [:0]const u8 =
+    \\attribute vec4 a_pos;
+    \\attribute vec4 a_color;
+    \\attribute vec4 a_texcoord;
+    \\uniform mat4 u_mvp;
+    \\uniform mat4 u_mv;
+    \\uniform mat4 u_texmtx;
+    \\varying vec4 v_color;
+    \\varying vec4 v_texcoord;
+    \\varying float v_eyedist;
+    \\void main() {
+    \\    gl_Position = u_mvp * a_pos;
+    \\    v_color = a_color;
+    \\    v_texcoord = u_texmtx * a_texcoord;
+    \\    vec4 eye = u_mv * a_pos;
+    \\    v_eyedist = length(eye.xyz);
+    \\}
+;
+
+const ff_fs_src: [:0]const u8 =
+    \\precision highp float;
+    \\uniform sampler2D u_tex;
+    \\uniform int u_texEnable;
+    \\uniform int u_alphaEnable;
+    \\uniform int u_alphaFunc;
+    \\uniform float u_alphaRef;
+    \\uniform int u_fogEnable;
+    \\uniform int u_fogMode;
+    \\uniform vec4 u_fogColor;
+    \\uniform float u_fogDensity;
+    \\uniform float u_fogStart;
+    \\uniform float u_fogEnd;
+    \\varying vec4 v_color;
+    \\varying vec4 v_texcoord;
+    \\varying float v_eyedist;
+    \\void main() {
+    \\    vec4 c = v_color;
+    \\    if (u_texEnable != 0) {
+    \\        c *= texture2D(u_tex, v_texcoord.xy);
+    \\    }
+    \\    if (u_alphaEnable != 0) {
+    \\        bool pass = true;
+    \\        if (u_alphaFunc == 0x0200) pass = false;
+    \\        else if (u_alphaFunc == 0x0201) pass = c.a < u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0202) pass = c.a == u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0203) pass = c.a <= u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0204) pass = c.a > u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0205) pass = c.a != u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0206) pass = c.a >= u_alphaRef;
+    \\        else pass = true;
+    \\        if (!pass) discard;
+    \\    }
+    \\    if (u_fogEnable != 0) {
+    \\        float f;
+    \\        if (u_fogMode == 0x0800) f = exp(-u_fogDensity * v_eyedist);
+    \\        else if (u_fogMode == 0x0801) f = exp(-(u_fogDensity * v_eyedist) * (u_fogDensity * v_eyedist));
+    \\        else f = (u_fogEnd - v_eyedist) / (u_fogEnd - u_fogStart);
+    \\        f = clamp(f, 0.0, 1.0);
+    \\        c.rgb = mix(u_fogColor.rgb, c.rgb, f);
+    \\    }
+    \\    gl_FragColor = c;
+    \\}
+;
+
+// Per-context fixed-function program + cached uniform locations (compiled lazily on the
+// first fixed-function draw in that context). Keyed by the GL program object id.
+const FfProgram = struct {
+    program: GLuint = 0,
+    u_mvp: GLint = -1,
+    u_mv: GLint = -1,
+    u_texmtx: GLint = -1,
+    u_tex: GLint = -1,
+    u_texEnable: GLint = -1,
+    u_alphaEnable: GLint = -1,
+    u_alphaFunc: GLint = -1,
+    u_alphaRef: GLint = -1,
+    u_fogEnable: GLint = -1,
+    u_fogMode: GLint = -1,
+    u_fogColor: GLint = -1,
+    u_fogDensity: GLint = -1,
+    u_fogStart: GLint = -1,
+    u_fogEnd: GLint = -1,
+};
+threadlocal var ff_prog: FfProgram = .{};
+
+fn ffUniform(prog: GLuint, name: [:0]const u8) GLint {
+    return getUniformLocation(prog, name.ptr);
+}
+
+/// Compile + link the fixed-function program once per context (thread-local). Returns false
+/// if compilation/linking failed (the draw is then dropped rather than crashing).
+fn ensureFixedFunctionProgram() bool {
+    if (ff_prog.program != 0) return true;
+
+    const vs = createShader(GL_VERTEX_SHADER);
+    const fs = createShader(GL_FRAGMENT_SHADER);
+    if (vs == 0 or fs == 0) return false;
+    var vsrc: [1]?[*:0]const GLchar = .{ff_vs_src.ptr};
+    var fsrc: [1]?[*:0]const GLchar = .{ff_fs_src.ptr};
+    shaderSource(vs, 1, &vsrc, null);
+    shaderSource(fs, 1, &fsrc, null);
+    compileShader(vs);
+    compileShader(fs);
+
+    const prog = createProgram();
+    if (prog == 0) return false;
+    attachShader(prog, vs);
+    attachShader(prog, fs);
+    bindAttribLocation(prog, FF_LOC_POS, "a_pos");
+    bindAttribLocation(prog, FF_LOC_COLOR, "a_color");
+    bindAttribLocation(prog, FF_LOC_TEXCOORD, "a_texcoord");
+    linkProgram(prog);
+
+    var linked: GLint = 0;
+    getProgramiv(prog, GL_LINK_STATUS, &linked);
+    if (linked == 0) return false;
+
+    ff_prog = .{
+        .program = prog,
+        .u_mvp = ffUniform(prog, "u_mvp"),
+        .u_mv = ffUniform(prog, "u_mv"),
+        .u_texmtx = ffUniform(prog, "u_texmtx"),
+        .u_tex = ffUniform(prog, "u_tex"),
+        .u_texEnable = ffUniform(prog, "u_texEnable"),
+        .u_alphaEnable = ffUniform(prog, "u_alphaEnable"),
+        .u_alphaFunc = ffUniform(prog, "u_alphaFunc"),
+        .u_alphaRef = ffUniform(prog, "u_alphaRef"),
+        .u_fogEnable = ffUniform(prog, "u_fogEnable"),
+        .u_fogMode = ffUniform(prog, "u_fogMode"),
+        .u_fogColor = ffUniform(prog, "u_fogColor"),
+        .u_fogDensity = ffUniform(prog, "u_fogDensity"),
+        .u_fogStart = ffUniform(prog, "u_fogStart"),
+        .u_fogEnd = ffUniform(prog, "u_fogEnd"),
+    };
+    return true;
+}
+
+/// True when a draw should be handled by the fixed-function pipeline: no user program is
+/// bound and the legacy vertex-position client array is enabled.
+fn fixedFunctionActive() bool {
+    return current_program == 0 and client_vertex.enabled;
+}
+
+// Saved GLES2 attribute-array state, restored after a fixed-function draw so the two paths
+// never leak into each other.
+const SavedAttribs = struct {
+    program: GLuint,
+    slots: [3]AttribArray,
+};
+
+fn ffSlotFrom(ca: ClientArray, generic: [4]f32) AttribArray {
+    if (ca.enabled) {
+        return .{
+            .enabled = true,
+            .size = ca.size,
+            .gl_type = ca.gl_type,
+            .normalized = false,
+            .stride = ca.stride,
+            .offset = @intFromPtr(ca.pointer),
+            .buffer = 0,
+        };
+    }
+    return .{ .enabled = false, .has_generic = true, .generic = generic };
+}
+
+/// Bind the fixed-function program + client arrays and upload the matrix/state uniforms.
+/// Returns the saved GLES2 state to restore (or null if the FF program failed to build).
+fn beginFixedFunction() ?SavedAttribs {
+    if (!ensureFixedFunctionProgram()) return null;
+
+    const saved = SavedAttribs{
+        .program = current_program,
+        .slots = .{ attribs[FF_LOC_POS], attribs[FF_LOC_COLOR], attribs[FF_LOC_TEXCOORD] },
+    };
+
+    // Position: always from the client vertex array.
+    attribs[FF_LOC_POS] = ffSlotFrom(client_vertex, .{ 0, 0, 0, 1 });
+    // Color: per-vertex array, else the current glColor4f constant.
+    attribs[FF_LOC_COLOR] = ffSlotFrom(client_color, current_color);
+    // Texcoord: per-vertex array, else the current glMultiTexCoord4f constant.
+    attribs[FF_LOC_TEXCOORD] = ffSlotFrom(client_texcoord, current_texcoord);
+
+    current_program = ff_prog.program;
+
+    // MVP = projection * modelview; also pass modelview alone for eye-space fog distance.
+    const mv = mv_stack.current().*;
+    const proj = proj_stack.current().*;
+    const mvp = mat4Mul(proj, mv);
+    uniformMatrix4fv(ff_prog.u_mvp, 1, GL_FALSE, &mvp);
+    uniformMatrix4fv(ff_prog.u_mv, 1, GL_FALSE, &mv);
+    uniformMatrix4fv(ff_prog.u_texmtx, 1, GL_FALSE, tex_stack.current());
+
+    const tex_on = ff_texture_2d and bound_texture_2d[active_texture_unit] != 0;
+    uniform1i(ff_prog.u_tex, 0);
+    uniform1i(ff_prog.u_texEnable, if (tex_on) 1 else 0);
+
+    uniform1i(ff_prog.u_alphaEnable, if (ff_alpha_test) 1 else 0);
+    uniform1i(ff_prog.u_alphaFunc, @intCast(alpha_func));
+    uniform1f(ff_prog.u_alphaRef, alpha_ref);
+
+    uniform1i(ff_prog.u_fogEnable, if (ff_fog) 1 else 0);
+    uniform1i(ff_prog.u_fogMode, @intCast(fog_mode));
+    uniform4f(ff_prog.u_fogColor, fog_color[0], fog_color[1], fog_color[2], fog_color[3]);
+    uniform1f(ff_prog.u_fogDensity, fog_density);
+    uniform1f(ff_prog.u_fogStart, fog_start);
+    uniform1f(ff_prog.u_fogEnd, fog_end);
+
+    return saved;
+}
+
+fn endFixedFunction(saved: SavedAttribs) void {
+    current_program = saved.program;
+    attribs[FF_LOC_POS] = saved.slots[0];
+    attribs[FF_LOC_COLOR] = saved.slots[1];
+    attribs[FF_LOC_TEXCOORD] = saved.slots[2];
+}
+
+/// Minimal legacy display lists (glGenLists/glNewList/glEndList/glCallList/glDeleteLists).
+/// Prism does not record or replay GL commands into a list (see shim note above): `newList`
+/// only tracks that a list ID is "defined" (so glIsList-style validity checks pass and
+/// glCallList on an unknown ID is a detectable no-op), and `callList` is a no-op. A caller
+/// that relies on Prism replaying list contents does not get that with this shim; 4J_Render's
+/// chunk display lists are consumed by its own CPU-side render path outside Prism's control.
+threadlocal var next_list_id: GLuint = 1;
+threadlocal var recording_list: GLuint = 0;
+var defined_lists: std.AutoHashMapUnmanaged(GLuint, void) = .empty;
+var defined_lists_lock: SpinLock = .{};
+
+pub fn genLists(range: GLsizei) GLuint {
+    if (range <= 0) return 0;
+    const first = next_list_id;
+    next_list_id += @intCast(range);
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    var i: GLuint = 0;
+    while (i < @as(GLuint, @intCast(range))) : (i += 1) {
+        defined_lists.put(gpa, first + i, {}) catch {};
+    }
+    return first;
+}
+pub fn newList(list: GLuint, mode: GLenum) void {
+    _ = mode;
+    recording_list = list;
+}
+pub fn endList() void {
+    recording_list = 0;
+}
+pub fn callList(list: GLuint) void {
+    _ = list;
+}
+pub fn deleteLists(list: GLuint, range: GLsizei) void {
+    if (range <= 0) return;
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    var i: GLuint = 0;
+    while (i < @as(GLuint, @intCast(range))) : (i += 1) {
+        _ = defined_lists.remove(list + i);
     }
 }
 
