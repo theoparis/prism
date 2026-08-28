@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const prism = @import("prism");
 const egl = @import("egl.zig");
+const gles = @import("gles.zig");
 const wlw = @import("wl_egl_window.zig");
 
 const EGLint = egl.EGLint;
@@ -58,7 +59,7 @@ pub const Config = struct {
             egl.EGL_COLOR_BUFFER_TYPE => egl.EGL_RGB_BUFFER,
             egl.EGL_CONFIG_CAVEAT => egl.EGL_NONE,
             egl.EGL_SURFACE_TYPE => egl.EGL_WINDOW_BIT | egl.EGL_PBUFFER_BIT,
-            egl.EGL_RENDERABLE_TYPE => egl.EGL_OPENGL_ES2_BIT | egl.EGL_OPENGL_ES3_BIT | egl.EGL_OPENGL_BIT,
+            egl.EGL_RENDERABLE_TYPE => egl.EGL_OPENGL_ES_BIT | egl.EGL_OPENGL_ES2_BIT | egl.EGL_OPENGL_ES3_BIT | egl.EGL_OPENGL_BIT,
             egl.EGL_CONFORMANT => egl.EGL_OPENGL_ES2_BIT | egl.EGL_OPENGL_ES3_BIT | egl.EGL_OPENGL_BIT,
             egl.EGL_NATIVE_RENDERABLE => egl.EGL_FALSE,
             egl.EGL_NATIVE_VISUAL_ID => 0,
@@ -169,6 +170,7 @@ pub const Context = struct {
     // until it is no longer current. We flag it here and tear it down at the next
     // eglMakeCurrent that releases it. The context stays usable until the app rebinds.
     pending_delete: bool = false,
+    legacy: gles.LegacyState = .{},
 
     // Per-context pool of expanded-vertex scratch buffers. Every draw expands indices into
     // a tightly-interleaved vertex buffer. Allocating a fresh GPU Resource per draw dominated
@@ -199,8 +201,11 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         unregisterContext(self);
-        // A context torn down mid-batch: drop the open command buffer (its draws were never needed).
+        // A context torn down mid-batch: drop the open command buffer before freeing
+        // internal programs whose pipelines it may reference.
         if (self.batch_cb) |cb| cb.deinit();
+        self.batch_cb = null;
+        @import("gles.zig").releaseLegacyState(&self.legacy);
         const dev = self.display.device.?;
         for (self.vb_pool.items) |p| dev.destroyResource(p.res);
         self.vb_pool.deinit(gpa);
@@ -609,7 +614,9 @@ pub const Surface = struct {
     pub fn deinit(self: *Surface) void {
         unregisterSurface(self);
         const dev = self.display.device.?;
-        if (self.wl_present) |wp| wp.deinit();
+        if (builtin.os.tag == .linux) {
+            if (self.wl_present) |wp| wp.deinit();
+        }
         if (self.hal_surface) |hs| dev.destroySurface(hs);
         // A GBM window owns its platform.Surface adapter (freed after the HAL
         // surface that referenced it). A Wayland window's is caller-owned.
@@ -1164,7 +1171,7 @@ fn satisfies(c: Config, attribute: EGLint, value: EGLint) bool {
             break :blk (have & value) == value;
         },
         egl.EGL_RENDERABLE_TYPE, egl.EGL_CONFORMANT => blk: {
-            const have = egl.EGL_OPENGL_ES2_BIT | egl.EGL_OPENGL_ES3_BIT | egl.EGL_OPENGL_BIT;
+            const have = c.attrib(attribute).?;
             break :blk (have & value) == value;
         },
         // Exact-match constraints we model.
@@ -1376,6 +1383,7 @@ test "getPlatformDisplay is stable per (platform, native) and initialize reports
 }
 
 test "gbm: getPlatformDisplay + createGbmWindowSurface build a window surface aliasing the gbm buffer" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var mb = prism.platform.gbm.MemoryBackend.init(gpa);
     defer mb.deinit();
     var dev = prism.platform.gbm.Device.init(mb.allocator());

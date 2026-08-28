@@ -110,6 +110,21 @@ pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = prism, .filters = test_filters })).step);
+    // Exercise the GLES tracker without linking the Linux EGL/Wayland frontend.
+    const gles_tests_module = b.createModule(.{
+        .root_source_file = b.path("lib/prism-egl/gles.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "prism", .module = prism },
+            .{ .name = "wayland", .module = wl_dep.module("wayland") },
+        },
+    });
+    if (target.result.os.tag == .linux) gles_tests_module.linkSystemLibrary("wayland-client", .{});
+    const gles_tests = b.addRunArtifact(b.addTest(.{ .root_module = gles_tests_module, .filters = test_filters }));
+    b.step("test-gles", "Run GLES state and rendering tests without the EGL frontend").dependOn(&gles_tests.step);
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) test_step.dependOn(&gles_tests.step);
 
     // The GLX vendor, EGL/GLVND vendor, and Vulkan ICD shared libraries.
     if (!target.result.cpu.arch.isWasm() and target.result.os.tag != .uefi and !target.result.abi.isAndroid()) {

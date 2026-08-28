@@ -27,6 +27,7 @@ pub const GLclampf = f32;
 pub const GLfloat = f32;
 pub const GLubyte = u8;
 pub const GLchar = u8;
+pub const GLdouble = f64;
 pub const GLboolean = u8;
 
 // --- GL constants -----------------------------------------------------------
@@ -758,6 +759,33 @@ pub fn resetThreadState() void {
     pack_row_length = 0;
     pack_skip_pixels = 0;
     pack_skip_rows = 0;
+    mv_stack = .{};
+    proj_stack = .{};
+    tex_stack = .{};
+    matrix_mode = GL_MODELVIEW;
+    current_color = .{ 1, 1, 1, 1 };
+    current_normal = .{ 0, 0, 1 };
+    shade_model = GL_SMOOTH;
+    alpha_func = GL_ALWAYS;
+    alpha_ref = 0;
+    fog_mode = GL_EXP;
+    fog_density = 1;
+    fog_start = 0;
+    fog_end = 1;
+    fog_color = .{ 0, 0, 0, 0 };
+    ff_texture_2d = @splat(false);
+    ff_alpha_test = false;
+    ff_fog = false;
+    ff_lighting = false;
+    current_texcoord = .{ 0, 0, 0, 1 };
+    client_vertex = .{};
+    client_color = .{};
+    client_texcoord = .{};
+    client_normal = .{};
+    recording_list = 0;
+    compiling_commands = .empty;
+    list_replay_depth = 0;
+    ff_prog = .{};
 }
 
 fn setError(code: GLenum) void {
@@ -776,6 +804,7 @@ fn clampUnit(v: GLclampf) f32 {
 }
 
 pub fn clearColor(r: GLclampf, g: GLclampf, b: GLclampf, a: GLclampf) void {
+    if (recordListCommand(.{ .clear_color = .{ r, g, b, a } })) return;
     clear_color = .{ .r = clampUnit(r), .g = clampUnit(g), .b = clampUnit(b), .a = clampUnit(a) };
 }
 
@@ -794,15 +823,22 @@ fn setCap(cap: GLenum, on: bool) void {
         GL_SAMPLE_ALPHA_TO_COVERAGE => fixed.sample_alpha_to_coverage = on,
         GL_SAMPLE_COVERAGE => fixed.sample_coverage = on,
         GL_RASTERIZER_DISCARD => fixed.rasterizer_discard = on,
+        // Legacy GLES1 fixed-function caps, honored by the fixed-function draw path.
+        GL_TEXTURE_2D => ff_texture_2d[active_texture_unit] = on,
+        GL_ALPHA_TEST => ff_alpha_test = on,
+        GL_FOG => ff_fog = on,
+        GL_LIGHTING => ff_lighting = on,
         GL_DITHER,
         => {}, // accepted, not yet modeled (no-op with correct semantics for es2gears)
         else => setError(GL_INVALID_ENUM),
     }
 }
 pub fn enable(cap: GLenum) void {
+    if (recordListCommand(.{ .enable = cap })) return;
     setCap(cap, true);
 }
 pub fn disable(cap: GLenum) void {
+    if (recordListCommand(.{ .disable = cap })) return;
     setCap(cap, false);
 }
 
@@ -1153,6 +1189,10 @@ pub fn isEnabled(cap: GLenum) GLboolean {
         GL_DITHER => GL_TRUE, // enabled by default in GL (a no-op in Prism)
         GL_SAMPLE_ALPHA_TO_COVERAGE => if (fixed.sample_alpha_to_coverage) GL_TRUE else GL_FALSE,
         GL_SAMPLE_COVERAGE => if (fixed.sample_coverage) GL_TRUE else GL_FALSE,
+        GL_TEXTURE_2D => @intFromBool(ff_texture_2d[active_texture_unit]),
+        GL_ALPHA_TEST => @intFromBool(ff_alpha_test),
+        GL_FOG => @intFromBool(ff_fog),
+        GL_LIGHTING => @intFromBool(ff_lighting),
         else => {
             setError(GL_INVALID_ENUM);
             return GL_FALSE;
@@ -1408,6 +1448,7 @@ pub fn getRenderbufferParameteriv(target: GLenum, pname: GLenum, params: ?[*]GLi
 }
 
 pub fn depthFunc(func: GLenum) void {
+    if (recordListCommand(.{ .depth_func = func })) return;
     fixed.depth_func = switch (func) {
         GL_NEVER => .never,
         GL_LESS => .less,
@@ -1441,12 +1482,14 @@ fn compareOpFromGl(func: GLenum) ?prism.hal.CompareOp {
 }
 
 pub fn depthMask(flag: GLboolean) void {
+    if (recordListCommand(.{ .depth_mask = flag })) return;
     fixed.depth_write = flag != 0;
 }
 
 /// glPolygonOffset: set the depth-bias factor (slope-scaled) + units (constant). Takes effect
 /// only while GL_POLYGON_OFFSET_FILL is enabled (wired through wantDepthState -> the HAL bias).
 pub fn polygonOffset(factor: GLfloat, units: GLfloat) void {
+    if (recordListCommand(.{ .polygon_offset = .{ factor, units } })) return;
     fixed.polygon_offset_factor = factor;
     fixed.polygon_offset_units = units;
 }
@@ -1511,6 +1554,7 @@ fn mapStencilFace(face: GLenum) ?StencilFace {
 /// (equivalent to glStencilFuncSeparate(GL_FRONT_AND_BACK, ...)). `ref` is clamped to the
 /// 8-bit stencil range.
 pub fn stencilFunc(func: GLenum, ref: GLint, mask: GLuint) void {
+    if (recordListCommand(.{ .stencil_func = .{ .func = func, .ref = ref, .mask = mask } })) return;
     stencilFuncSeparate(GL_FRONT_AND_BACK, func, ref, mask);
 }
 
@@ -1535,6 +1579,7 @@ pub fn stencilFuncSeparate(face: GLenum, func: GLenum, ref: GLint, mask: GLuint)
 
 /// glStencilOp: set the stencil-fail / depth-fail / depth-pass actions on both faces.
 pub fn stencilOp(sfail: GLenum, dpfail: GLenum, dppass: GLenum) void {
+    if (recordListCommand(.{ .stencil_op = .{ sfail, dpfail, dppass } })) return;
     stencilOpSeparate(GL_FRONT_AND_BACK, sfail, dpfail, dppass);
 }
 
@@ -1558,6 +1603,7 @@ pub fn stencilOpSeparate(face: GLenum, sfail: GLenum, dpfail: GLenum, dppass: GL
 
 /// glStencilMask: set which stencil bits a write may modify on both faces.
 pub fn stencilMask(mask: GLuint) void {
+    if (recordListCommand(.{ .stencil_mask = mask })) return;
     stencilMaskSeparate(GL_FRONT_AND_BACK, mask);
 }
 
@@ -1575,6 +1621,7 @@ pub fn clearStencil(s: GLint) void {
 }
 
 pub fn cullFace(mode: GLenum) void {
+    if (recordListCommand(.{ .cull_face = mode })) return;
     fixed.cull_mode = switch (mode) {
         GL_FRONT => .front,
         GL_BACK => .back,
@@ -1589,6 +1636,7 @@ pub fn cullFace(mode: GLenum) void {
 }
 
 pub fn frontFace(mode: GLenum) void {
+    if (recordListCommand(.{ .front_face = mode })) return;
     fixed.front_face = switch (mode) {
         GL_CW => .clockwise,
         GL_CCW => .counter_clockwise,
@@ -1635,6 +1683,7 @@ fn blendOpFromGl(m: GLenum) ?prism.hal.BlendOp {
 }
 
 pub fn blendFunc(sfactor: GLenum, dfactor: GLenum) void {
+    if (recordListCommand(.{ .blend_func = .{ sfactor, dfactor } })) return;
     const s = blendFactorFromGl(sfactor) orelse return setError(GL_INVALID_ENUM);
     const d = blendFactorFromGl(dfactor) orelse return setError(GL_INVALID_ENUM);
     fixed.blend_src_rgb = s;
@@ -1674,10 +1723,12 @@ pub fn blendColor(r: GLclampf, g: GLclampf, b: GLclampf, a: GLclampf) void {
 /// glColorMask: enable/disable writes to each color channel. Applies to every draw until
 /// changed, independent of blending. A stencil-only mask pass sets all false.
 pub fn colorMask(r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean) void {
+    if (recordListCommand(.{ .color_mask = .{ r, g, b, a } })) return;
     fixed.color_mask = .{ r != 0, g != 0, b != 0, a != 0 };
 }
 
 pub fn setViewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei) void {
+    if (recordListCommand(.{ .viewport = .{ x, y, width, height } })) return;
     if (width < 0 or height < 0) {
         setError(GL_INVALID_VALUE);
         return;
@@ -1697,6 +1748,7 @@ threadlocal var primitive_restart_fixed: bool = false;
 
 /// glLineWidth: set the line width in pixels (must be > 0, else GL_INVALID_VALUE).
 pub fn setLineWidth(w: GLfloat) void {
+    if (recordListCommand(.{ .line_width = w })) return;
     if (w <= 0) {
         setError(GL_INVALID_VALUE);
         return;
@@ -1715,6 +1767,7 @@ pub fn sampleCoverage(value: GLfloat, invert: GLboolean) void {
 /// is GL_INVALID_VALUE. The box only clips when GL_SCISSOR_TEST is enabled. The draw path
 /// flips y to the HAL's top-left origin at submit time.
 pub fn setScissorBox(x: GLint, y: GLint, width: GLsizei, height: GLsizei) void {
+    if (recordListCommand(.{ .scissor = .{ x, y, width, height } })) return;
     if (width < 0 or height < 0) {
         setError(GL_INVALID_VALUE);
         return;
@@ -1785,6 +1838,7 @@ threadlocal var pending_depth_clear: bool = false;
 threadlocal var pending_stencil_clear: bool = false;
 
 pub fn clear(mask: GLbitfield) void {
+    if (recordListCommand(.{ .clear = mask })) return;
     const known = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if ((mask & ~known) != 0) {
         setError(GL_INVALID_VALUE);
@@ -3224,6 +3278,7 @@ pub fn activeTexture(texture: GLenum) void {
         setError(GL_INVALID_ENUM);
         return;
     }
+    if (recordListCommand(.{ .active_texture = texture })) return;
     active_texture_unit = texture - GL_TEXTURE0;
 }
 
@@ -3232,6 +3287,7 @@ pub fn bindTexture(target: GLenum, id: GLuint) void {
         setError(GL_INVALID_ENUM);
         return;
     }
+    if (recordListCommand(.{ .bind_texture = .{ .target = target, .texture = id } })) return;
     if (id != 0) {
         obj_lock.lock();
         const t = findTexture(id);
@@ -6263,6 +6319,7 @@ pub fn getShaderSource(shader: GLuint, buf_size: GLsizei, length: ?*GLint, sourc
 /// glGetFloatv(GL_DEPTH_RANGE). the default [0,1] is Prism's native Vulkan depth range.
 threadlocal var depth_range: [2]f32 = .{ 0, 1 };
 pub fn depthRangef(n: GLfloat, f: GLfloat) void {
+    if (recordListCommand(.{ .depth_range = .{ n, f } })) return;
     depth_range = .{ std.math.clamp(n, 0, 1), std.math.clamp(f, 0, 1) };
 }
 
@@ -7581,8 +7638,14 @@ const DrawLayout = struct {
 /// int) converts per component (normalizing if requested). Out-of-range source reads leave the
 /// dest as its zeroed default.
 fn fetchAttrib(emap: []u8, dst_off: usize, s: DrawSource, so: usize) void {
+    // The fixed-function shader consumes vec4 inputs. Fill missing array components
+    // before gathering, so a vec3 position cannot shift the subsequent color input.
+    if (s.comp_bytes == 16 and s.size < 4) {
+        const one: f32 = 1;
+        @memcpy(emap[dst_off + 12 ..][0..4], std.mem.asBytes(&one));
+    }
     if (s.gl_type == GL_FLOAT) {
-        if (so + s.comp_bytes <= s.src.len) @memcpy(emap[dst_off .. dst_off + s.comp_bytes], s.src[so .. so + s.comp_bytes]);
+        if (so + s.src_comp_bytes <= s.src.len) @memcpy(emap[dst_off .. dst_off + s.src_comp_bytes], s.src[so .. so + s.src_comp_bytes]);
         return;
     }
     const tsz = attribTypeSize(s.gl_type);
@@ -7620,11 +7683,12 @@ fn resolveDrawLayout(max_vi: u32) ?DrawLayout {
             }
             continue;
         }
-        const fmt = attribFormat(a.size) orelse {
+        const dest_size: GLint = if (ff_prog.program != 0 and current_program == ff_prog.program and loc <= FF_LOC_TEXCOORD) 4 else a.size;
+        const fmt = attribFormat(dest_size) orelse {
             setError(GL_INVALID_OPERATION);
             return null;
         };
-        const comp_bytes: u32 = @as(u32, @intCast(a.size)) * 4; // DEST (interleaved f32) bytes
+        const comp_bytes: u32 = @as(u32, @intCast(dest_size)) * 4; // DEST (interleaved f32) bytes
         const src_comp_bytes: u32 = @as(u32, @intCast(a.size)) * attribTypeSize(a.gl_type); // SOURCE bytes
         // A zero stride means tightly packed (this attribute's SOURCE component bytes); otherwise
         // the app's interleaving stride.
@@ -8681,7 +8745,7 @@ fn genMipLevel(map: []u8, base: usize, w: u32, h: u32, level: u8, bpp: u32) void
 /// buildArrayIndices, so the pipeline only ever sees list topologies). null = invalid mode.
 fn modeTopology(mode: GLenum) ?prism.hal.Topology {
     return switch (mode) {
-        GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN => .triangle_list,
+        GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_QUADS, GL_QUAD_STRIP, GL_POLYGON => .triangle_list,
         GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP => .line_list,
         GL_POINTS => .point_list,
         else => null,
@@ -8692,8 +8756,35 @@ fn modeTopology(mode: GLenum) ?prism.hal.Topology {
 /// read at pipeline (re)build so the pipeline is keyed on the primitive kind.
 threadlocal var draw_topology: prism.hal.Topology = .triangle_list;
 
+fn reserveExpandedIndices(mode: GLenum, count: u32, out: *std.ArrayListUnmanaged(u32)) bool {
+    const n: u64 = count;
+    const needed: u64 = switch (mode) {
+        GL_POINTS => n,
+        GL_LINES => n / 2 * 2,
+        GL_LINE_STRIP => if (n >= 2) (n - 1) * 2 else 0,
+        GL_LINE_LOOP => if (n >= 2) n * 2 else 0,
+        GL_TRIANGLES => n / 3 * 3,
+        GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_POLYGON => if (n >= 3) (n - 2) * 3 else 0,
+        GL_QUADS => n / 4 * 6,
+        GL_QUAD_STRIP => if (n >= 4) (n / 2 - 1) * 6 else 0,
+        else => {
+            setError(GL_INVALID_ENUM);
+            return false;
+        },
+    };
+    if (needed > std.math.maxInt(usize)) {
+        setError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    out.ensureTotalCapacity(gpa, @intCast(needed)) catch {
+        setError(GL_OUT_OF_MEMORY);
+        return false;
+    };
+    return true;
+}
 fn buildArrayIndices(mode: GLenum, first: u32, count: u32, out: *std.ArrayListUnmanaged(u32)) ?usize {
     out.clearRetainingCapacity();
+    if (!reserveExpandedIndices(mode, count, out)) return null;
     switch (mode) {
         GL_TRIANGLES => {
             var i: u32 = 0;
@@ -8748,13 +8839,37 @@ fn buildArrayIndices(mode: GLenum, first: u32, count: u32, out: *std.ArrayListUn
                 }
             }
         },
-        GL_TRIANGLE_FAN => {
-            // v0,v1,v2 ; v0,v2,v3 ; ...
+        GL_TRIANGLE_FAN, GL_POLYGON => {
+            // v0,v1,v2 ; v0,v2,v3 ; ... (GL_POLYGON, a convex polygon, expands identically).
             var i: u32 = 1;
             while (i + 1 < count) : (i += 1) {
                 out.append(gpa, first) catch return null;
                 out.append(gpa, first + i) catch return null;
                 out.append(gpa, first + i + 1) catch return null;
+            }
+        },
+        GL_QUADS => {
+            // Legacy quads: each group of 4 verts -> 2 tris (0,1,2)(0,2,3).
+            var i: u32 = 0;
+            while (i + 4 <= count) : (i += 4) {
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 1) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+            }
+        },
+        GL_QUAD_STRIP => {
+            // Quad strip: quad k uses verts 2k,2k+1,2k+3,2k+2 -> tris (2k,2k+1,2k+3)(2k,2k+3,2k+2).
+            var i: u32 = 0;
+            while (i + 4 <= count) : (i += 2) {
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 1) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+                out.append(gpa, first + i) catch return null;
+                out.append(gpa, first + i + 3) catch return null;
+                out.append(gpa, first + i + 2) catch return null;
             }
         },
         else => {
@@ -8778,6 +8893,17 @@ pub fn drawArrays(mode: GLenum, first: GLint, count: GLsizei) void {
         return;
     }
     if (count == 0) return;
+    if (modeTopology(mode) == null) return setError(GL_INVALID_ENUM);
+    if (recordArrayDraw(mode, first, count)) return;
+    if (fixedFunctionActive()) {
+        const saved = beginFixedFunction() orelse return;
+        defer endFixedFunction(saved);
+        const nff = buildArrayIndices(mode, @intCast(first), @intCast(count), &draw_indices) orelse return;
+        if (nff == 0) return;
+        draw_topology = modeTopology(mode) orelse .triangle_list;
+        drawTriangleList(draw_indices.items[0..nff]);
+        return;
+    }
     const n = buildArrayIndices(mode, @intCast(first), @intCast(count), &draw_indices) orelse return;
     if (n == 0) return;
     draw_topology = modeTopology(mode) orelse .triangle_list;
@@ -8820,6 +8946,11 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
         setError(GL_INVALID_ENUM); // reject an unknown primitive mode before the expansion switch
         return;
     }
+    var ff_saved: ?SavedAttribs = null;
+    if (fixedFunctionActive() and instancecount == 1 and (recording_list == 0 or list_replay_depth != 0)) {
+        ff_saved = beginFixedFunction() orelse return;
+    }
+    defer if (ff_saved) |s| endFixedFunction(s);
     const elem_size: usize = switch (index_type) {
         GL_UNSIGNED_BYTE => 1,
         GL_UNSIGNED_SHORT => 2,
@@ -8829,25 +8960,39 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
             return;
         },
     };
-    if (mode != GL_TRIANGLES and mode != GL_TRIANGLE_STRIP and mode != GL_TRIANGLE_FAN) {
-        setError(GL_INVALID_ENUM);
-        return;
-    }
-    obj_lock.lock();
-    const ib = findBuffer(bound_element_buffer) orelse {
-        obj_lock.unlock();
-        setError(GL_INVALID_OPERATION); // no element-array buffer bound
-        return;
+    const index_bytes = std.math.mul(usize, @intCast(count), elem_size) catch return setError(GL_INVALID_OPERATION);
+    const using_element_buffer = bound_element_buffer != 0;
+    if (using_element_buffer) obj_lock.lock();
+    const bytes: []const u8 = if (using_element_buffer) blk: {
+        const ib = findBuffer(bound_element_buffer) orelse {
+            obj_lock.unlock();
+            setError(GL_INVALID_OPERATION);
+            return;
+        };
+        if (offset > ib.bytes.items.len or index_bytes > ib.bytes.items.len - offset) {
+            obj_lock.unlock();
+            return setError(GL_INVALID_OPERATION);
+        }
+        break :blk ib.bytes.items;
+    } else blk: {
+        if (offset == 0) {
+            setError(GL_INVALID_OPERATION);
+            return;
+        }
+        break :blk @as([*]const u8, @ptrFromInt(offset))[0..index_bytes];
     };
-    // Read the raw indices out of the bound element buffer at `offset`.
+    // Read indices from the bound element buffer or client memory.
     var raw: std.ArrayListUnmanaged(u32) = .empty;
     defer raw.deinit(gpa);
     const ucount: usize = @intCast(count);
-    const bytes = ib.bytes.items;
+    raw.ensureTotalCapacity(gpa, ucount) catch {
+        if (using_element_buffer) obj_lock.unlock();
+        return setError(GL_OUT_OF_MEMORY);
+    };
     var i: usize = 0;
     var ok = true;
     while (i < ucount) : (i += 1) {
-        const bo = offset + i * elem_size;
+        const bo = (if (using_element_buffer) offset else 0) + i * elem_size;
         if (bo + elem_size > bytes.len) {
             ok = false;
             break;
@@ -8863,14 +9008,23 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
             break;
         };
     }
-    obj_lock.unlock();
+    if (using_element_buffer) obj_lock.unlock();
     if (!ok or raw.items.len == 0) {
         if (!ok) setError(GL_INVALID_OPERATION);
         return;
     }
+    if (recording_list != 0 and list_replay_depth == 0) {
+        if (instancecount != 1 or !fixedFunctionActive() or primitive_restart_fixed) return setError(GL_INVALID_OPERATION);
+        const cmd = captureListDraw(mode, raw.items) catch |err| {
+            return setError(if (err == error.OutOfMemory) GL_OUT_OF_MEMORY else GL_INVALID_OPERATION);
+        };
+        if (recordListCommand(cmd)) return;
+        ff_saved = beginFixedFunction() orelse return;
+    }
     // Expand the index list to a base-list (triangle/line/point) per the primitive mode.
     draw_topology = modeTopology(mode) orelse .triangle_list;
     draw_indices.clearRetainingCapacity();
+    if (!reserveExpandedIndices(mode, @intCast(count), &draw_indices)) return;
     const r = raw.items;
     switch (mode) {
         GL_TRIANGLES => {
@@ -8910,7 +9064,29 @@ pub fn drawElementsInstanced(mode: GLenum, count: GLsizei, index_type: GLenum, o
             for (r) |v| draw_indices.append(gpa, v) catch return;
         },
         GL_TRIANGLE_STRIP => forEachRestartRun(r, index_type, expandStripRun),
-        GL_TRIANGLE_FAN => forEachRestartRun(r, index_type, expandFanRun),
+        GL_TRIANGLE_FAN, GL_POLYGON => forEachRestartRun(r, index_type, expandFanRun),
+        GL_QUADS => {
+            var k: usize = 0;
+            while (k + 4 <= r.len) : (k += 4) {
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 1]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+            }
+        },
+        GL_QUAD_STRIP => {
+            var k: usize = 0;
+            while (k + 4 <= r.len) : (k += 2) {
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 1]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+                draw_indices.append(gpa, r[k]) catch return;
+                draw_indices.append(gpa, r[k + 3]) catch return;
+                draw_indices.append(gpa, r[k + 2]) catch return;
+            }
+        },
         else => unreachable,
     }
     drawTriangleListInstanced(draw_indices.items, @intCast(instancecount));
@@ -8971,8 +9147,1019 @@ fn expandFanRun(run: []const u32) void {
     }
 }
 
+// GLES1 / legacy GL 1.x fixed-function compatibility
+pub const GL_MODELVIEW: GLenum = 0x1700;
+pub const GL_PROJECTION: GLenum = 0x1701;
+
+pub const GL_FLAT: GLenum = 0x1D00;
+pub const GL_SMOOTH: GLenum = 0x1D01;
+
+pub const GL_FOG: GLenum = 0x0B60;
+pub const GL_FOG_MODE: GLenum = 0x0B65;
+pub const GL_FOG_DENSITY: GLenum = 0x0B62;
+pub const GL_FOG_START: GLenum = 0x0B63;
+pub const GL_FOG_END: GLenum = 0x0B64;
+pub const GL_FOG_COLOR: GLenum = 0x0B66;
+pub const GL_EXP: GLenum = 0x0800;
+pub const GL_EXP2: GLenum = 0x0801;
+
+pub const GL_LIGHT0: GLenum = 0x4000;
+pub const GL_LIGHT1: GLenum = 0x4001;
+pub const GL_LIGHTING: GLenum = 0x0B50;
+pub const GL_AMBIENT: GLenum = 0x1200;
+pub const GL_DIFFUSE: GLenum = 0x1201;
+pub const GL_SPECULAR: GLenum = 0x1202;
+pub const GL_POSITION: GLenum = 0x1203;
+pub const GL_AMBIENT_AND_DIFFUSE: GLenum = 0x1602;
+pub const GL_EMISSION: GLenum = 0x1600;
+pub const GL_SHININESS: GLenum = 0x1601;
+
+pub const GL_VERTEX_ARRAY: GLenum = 0x8074;
+pub const GL_NORMAL_ARRAY: GLenum = 0x8075;
+pub const GL_COLOR_ARRAY: GLenum = 0x8076;
+pub const GL_TEXTURE_COORD_ARRAY: GLenum = 0x8078;
+
+pub const GL_TEXTURE_GEN_S: GLenum = 0x0C60;
+pub const GL_TEXTURE_GEN_T: GLenum = 0x0C61;
+pub const GL_TEXTURE_GEN_MODE: GLenum = 0x2500;
+
+pub const GL_COMPILE: GLenum = 0x1300;
+pub const GL_COMPILE_AND_EXECUTE: GLenum = 0x1301;
+
+pub const GL_QUADS: GLenum = 0x0007;
+pub const GL_QUAD_STRIP: GLenum = 0x0008;
+pub const GL_POLYGON: GLenum = 0x0009;
+pub const GL_ALPHA_TEST: GLenum = 0x0BC0;
+
+/// A column-major 4x4 float matrix, GL layout (m[col*4+row]).
+pub const Mat4 = [16]f32;
+
+pub const mat4_identity: Mat4 = .{
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+};
+
+fn mat4Mul(a: Mat4, b: Mat4) Mat4 {
+    var r: Mat4 = undefined;
+    var col: usize = 0;
+    while (col < 4) : (col += 1) {
+        var row: usize = 0;
+        while (row < 4) : (row += 1) {
+            var sum: f32 = 0;
+            var k: usize = 0;
+            while (k < 4) : (k += 1) sum += a[k * 4 + row] * b[col * 4 + k];
+            r[col * 4 + row] = sum;
+        }
+    }
+    return r;
+}
+
+const MAX_MATRIX_STACK_DEPTH = 32;
+const MatrixStack = struct {
+    stack: [MAX_MATRIX_STACK_DEPTH]Mat4 = @splat(mat4_identity),
+    top: usize = 0,
+
+    fn current(self: *MatrixStack) *Mat4 {
+        return &self.stack[self.top];
+    }
+
+    fn push(self: *MatrixStack) void {
+        if (self.top + 1 >= MAX_MATRIX_STACK_DEPTH) return setError(0x0503); // GL_STACK_OVERFLOW
+        self.stack[self.top + 1] = self.stack[self.top];
+        self.top += 1;
+    }
+
+    fn pop(self: *MatrixStack) void {
+        if (self.top == 0) return setError(0x0504); // GL_STACK_UNDERFLOW
+        self.top -= 1;
+    }
+};
+
+threadlocal var mv_stack: MatrixStack = .{};
+threadlocal var proj_stack: MatrixStack = .{};
+threadlocal var tex_stack: MatrixStack = .{};
+threadlocal var matrix_mode: GLenum = GL_MODELVIEW;
+
+fn activeStack() *MatrixStack {
+    return switch (matrix_mode) {
+        GL_PROJECTION => &proj_stack,
+        GL_TEXTURE => &tex_stack,
+        else => &mv_stack,
+    };
+}
+
+pub fn matrixMode(mode: GLenum) void {
+    if (mode != GL_MODELVIEW and mode != GL_PROJECTION and mode != GL_TEXTURE) return setError(GL_INVALID_ENUM);
+    if (recordListCommand(.{ .matrix_mode = mode })) return;
+    matrix_mode = mode;
+}
+
+pub fn loadIdentity() void {
+    if (recordListCommand(.load_identity)) return;
+    activeStack().current().* = mat4_identity;
+}
+
+pub fn loadMatrixf(m: ?[*]const GLfloat) void {
+    const mp = m orelse return;
+    const matrix = mp[0..16].*;
+    if (recordListCommand(.{ .load_matrix = matrix })) return;
+    activeStack().current().* = matrix;
+}
+
+fn multiplyMatrix(matrix: Mat4) void {
+    const cur = activeStack().current();
+    cur.* = mat4Mul(cur.*, matrix);
+}
+
+pub fn multMatrixf(m: ?[*]const GLfloat) void {
+    const mp = m orelse return;
+    const matrix = mp[0..16].*;
+    if (recordListCommand(.{ .mult_matrix = matrix })) return;
+    multiplyMatrix(matrix);
+}
+
+pub fn pushMatrix() void {
+    if (recordListCommand(.push_matrix)) return;
+    activeStack().push();
+}
+
+pub fn popMatrix() void {
+    if (recordListCommand(.pop_matrix)) return;
+    activeStack().pop();
+}
+
+pub fn translatef(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    if (recordListCommand(.{ .translate = .{ x, y, z } })) return;
+    var t = mat4_identity;
+    t[12] = x;
+    t[13] = y;
+    t[14] = z;
+    multiplyMatrix(t);
+}
+
+pub fn scalef(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    if (recordListCommand(.{ .scale = .{ x, y, z } })) return;
+    var s = mat4_identity;
+    s[0] = x;
+    s[5] = y;
+    s[10] = z;
+    multiplyMatrix(s);
+}
+
+pub fn rotatef(angle_deg: GLfloat, x: GLfloat, y: GLfloat, z: GLfloat) void {
+    if (recordListCommand(.{ .rotate = .{ angle_deg, x, y, z } })) return;
+    const len2 = x * x + y * y + z * z;
+    if (len2 <= 0) return;
+    const inv_len = 1.0 / @sqrt(len2);
+    const ax = x * inv_len;
+    const ay = y * inv_len;
+    const az = z * inv_len;
+    const rad = angle_deg * (std.math.pi / 180.0);
+    const c = @cos(rad);
+    const s = @sin(rad);
+    const t = 1.0 - c;
+    var r = mat4_identity;
+    r[0] = t * ax * ax + c;
+    r[1] = t * ax * ay + s * az;
+    r[2] = t * ax * az - s * ay;
+    r[4] = t * ax * ay - s * az;
+    r[5] = t * ay * ay + c;
+    r[6] = t * ay * az + s * ax;
+    r[8] = t * ax * az + s * ay;
+    r[9] = t * ay * az - s * ax;
+    r[10] = t * az * az + c;
+    multiplyMatrix(r);
+}
+
+pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, z_near: f64, z_far: f64) void {
+    var m = mat4_identity;
+    const rl = right - left;
+    const tb = top - bottom;
+    const fn_ = z_far - z_near;
+    m[0] = @floatCast(2.0 / rl);
+    m[5] = @floatCast(2.0 / tb);
+    m[10] = @floatCast(-2.0 / fn_);
+    m[12] = @floatCast(-(right + left) / rl);
+    m[13] = @floatCast(-(top + bottom) / tb);
+    m[14] = @floatCast(-(z_far + z_near) / fn_);
+    multMatrixf(&m);
+}
+
+pub fn frustum(left: f64, right: f64, bottom: f64, top: f64, z_near: f64, z_far: f64) void {
+    var m: Mat4 = @splat(0);
+    const rl = right - left;
+    const tb = top - bottom;
+    const fn_ = z_far - z_near;
+    m[0] = @floatCast(2.0 * z_near / rl);
+    m[5] = @floatCast(2.0 * z_near / tb);
+    m[8] = @floatCast((right + left) / rl);
+    m[9] = @floatCast((top + bottom) / tb);
+    m[10] = @floatCast(-(z_far + z_near) / fn_);
+    m[11] = -1;
+    m[14] = @floatCast(-(2.0 * z_far * z_near) / fn_);
+    multMatrixf(&m);
+}
+
+/// Current color (glColor4f/glColor3f), fog/light/material parameters, shade model, and
+/// legacy client-side vertex-array pointers. Storage only - see the shim note above.
+threadlocal var current_color: [4]f32 = .{ 1, 1, 1, 1 };
+threadlocal var current_normal: [3]f32 = .{ 0, 0, 1 };
+threadlocal var shade_model: GLenum = GL_SMOOTH;
+threadlocal var alpha_func: GLenum = GL_ALWAYS;
+threadlocal var alpha_ref: GLfloat = 0;
+threadlocal var fog_mode: GLenum = GL_EXP;
+threadlocal var fog_density: GLfloat = 1.0;
+threadlocal var fog_start: GLfloat = 0;
+threadlocal var fog_end: GLfloat = 1;
+threadlocal var fog_color: [4]f32 = .{ 0, 0, 0, 0 };
+
+// Legacy GLES1 fixed-function enable flags (glEnable/glDisable), consumed by the
+// fixed-function draw path to select shader features and uniforms.
+threadlocal var ff_texture_2d: [MAX_TEXTURE_UNITS]bool = @splat(false);
+threadlocal var ff_alpha_test: bool = false;
+threadlocal var ff_fog: bool = false;
+threadlocal var ff_lighting: bool = false;
+// The current glMultiTexCoord4f value used when GL_TEXTURE_COORD_ARRAY is disabled.
+threadlocal var current_texcoord: [4]f32 = .{ 0, 0, 0, 1 };
+
+pub fn color4f(r: GLfloat, g: GLfloat, b: GLfloat, a: GLfloat) void {
+    if (recordListCommand(.{ .color = .{ r, g, b, a } })) return;
+    current_color = .{ r, g, b, a };
+}
+pub fn color3f(r: GLfloat, g: GLfloat, b: GLfloat) void {
+    if (recordListCommand(.{ .color = .{ r, g, b, 1 } })) return;
+    current_color = .{ r, g, b, 1 };
+}
+pub fn normal3f(x: GLfloat, y: GLfloat, z: GLfloat) void {
+    if (recordListCommand(.{ .normal = .{ x, y, z } })) return;
+    current_normal = .{ x, y, z };
+}
+pub fn shadeModel(mode: GLenum) void {
+    if (mode != GL_FLAT and mode != GL_SMOOTH) return setError(GL_INVALID_ENUM);
+    if (recordListCommand(.{ .shade_model = mode })) return;
+    shade_model = mode;
+}
+pub fn alphaFunc(func: GLenum, ref: GLfloat) void {
+    if (func < GL_NEVER or func > GL_ALWAYS) return setError(GL_INVALID_ENUM);
+    if (recordListCommand(.{ .alpha = .{ .func = func, .ref = clampUnit(ref) } })) return;
+    alpha_func = func;
+    alpha_ref = clampUnit(ref);
+}
+pub fn fogf(pname: GLenum, param: GLfloat) void {
+    switch (pname) {
+        GL_FOG_MODE => if (param != @as(f32, @floatFromInt(GL_LINEAR)) and param != @as(f32, @floatFromInt(GL_EXP)) and param != @as(f32, @floatFromInt(GL_EXP2))) return setError(GL_INVALID_ENUM),
+        GL_FOG_DENSITY => if (!(param >= 0)) return setError(GL_INVALID_VALUE),
+        GL_FOG_START, GL_FOG_END => {},
+        else => return setError(GL_INVALID_ENUM),
+    }
+    if (recordListCommand(.{ .fog = .{ .pname = pname, .value = .{ param, 0, 0, 0 } } })) return;
+    switch (pname) {
+        GL_FOG_MODE => fog_mode = @intFromFloat(param),
+        GL_FOG_DENSITY => fog_density = param,
+        GL_FOG_START => fog_start = param,
+        GL_FOG_END => fog_end = param,
+        else => unreachable,
+    }
+}
+pub fn fogfv(pname: GLenum, params: ?[*]const GLfloat) void {
+    const p = params orelse return;
+    if (pname != GL_FOG_COLOR) return fogf(pname, p[0]);
+    if (recordListCommand(.{ .fog = .{ .pname = pname, .value = p[0..4].* } })) return;
+    for (&fog_color, p[0..4]) |*c, value| c.* = clampUnit(value);
+}
+/// glLightfv/glLightModelfv/glMaterialfv/glTexGeni: legacy per-light/material/texgen state.
+/// Storage-only (see shim note above) - accepted so callers link and don't crash.
+pub fn lightfv(light: GLenum, pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = light;
+    _ = pname;
+    _ = params;
+}
+pub fn lightModelfv(pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = pname;
+    _ = params;
+}
+pub fn materialfv(face: GLenum, pname: GLenum, params: ?[*]const GLfloat) void {
+    _ = face;
+    _ = pname;
+    _ = params;
+}
+pub fn texGeni(coord: GLenum, pname: GLenum, param: GLint) void {
+    _ = coord;
+    _ = pname;
+    _ = param;
+}
+
+/// Legacy client-side vertex array pointers (glVertexPointer/glColorPointer/
+/// glTexCoordPointer) + enable flags (glEnableClientState/glDisableClientState). Storage
+/// only: Prism's draw path is GLES2 vertex-attrib-array based (see attribs above); a caller
+/// driving geometry purely through these legacy arrays + glDrawArrays/glDrawElements without
+/// its own shader does not get fixed-function transform+lighting from Prism.
+const ClientArray = struct {
+    enabled: bool = false,
+    size: GLint = 4,
+    gl_type: GLenum = GL_FLOAT,
+    stride: GLsizei = 0,
+    pointer: ?*const anyopaque = null,
+    buffer: GLuint = 0,
+};
+threadlocal var client_vertex: ClientArray = .{};
+threadlocal var client_color: ClientArray = .{};
+threadlocal var client_texcoord: ClientArray = .{};
+threadlocal var client_normal: ClientArray = .{};
+
+pub fn enableClientState(cap: GLenum) void {
+    switch (cap) {
+        GL_VERTEX_ARRAY => client_vertex.enabled = true,
+        GL_COLOR_ARRAY => client_color.enabled = true,
+        GL_TEXTURE_COORD_ARRAY => client_texcoord.enabled = true,
+        GL_NORMAL_ARRAY => client_normal.enabled = true,
+        else => {},
+    }
+}
+pub fn disableClientState(cap: GLenum) void {
+    switch (cap) {
+        GL_VERTEX_ARRAY => client_vertex.enabled = false,
+        GL_COLOR_ARRAY => client_color.enabled = false,
+        GL_TEXTURE_COORD_ARRAY => client_texcoord.enabled = false,
+        GL_NORMAL_ARRAY => client_normal.enabled = false,
+        else => {},
+    }
+}
+pub fn vertexPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    if (size < 2 or size > 4 or stride < 0) return setError(GL_INVALID_VALUE);
+    if (gl_type != GL_FLOAT and gl_type != GL_SHORT and gl_type != GL_FIXED and gl_type != GL_INT) return setError(GL_INVALID_ENUM);
+    client_vertex = .{ .enabled = client_vertex.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer, .buffer = bound_array_buffer };
+}
+pub fn colorPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    if ((size != 3 and size != 4) or stride < 0) return setError(GL_INVALID_VALUE);
+    if (gl_type != GL_FLOAT and gl_type != GL_FIXED and gl_type != GL_BYTE and gl_type != GL_UNSIGNED_BYTE and gl_type != GL_SHORT and gl_type != GL_UNSIGNED_SHORT and gl_type != GL_INT and gl_type != GL_UNSIGNED_INT) return setError(GL_INVALID_ENUM);
+    client_color = .{ .enabled = client_color.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer, .buffer = bound_array_buffer };
+}
+pub fn texCoordPointer(size: GLint, gl_type: GLenum, stride: GLsizei, pointer: ?*const anyopaque) void {
+    if (size < 1 or size > 4 or stride < 0) return setError(GL_INVALID_VALUE);
+    if (gl_type != GL_FLOAT and gl_type != GL_SHORT and gl_type != GL_FIXED and gl_type != GL_INT) return setError(GL_INVALID_ENUM);
+    client_texcoord = .{ .enabled = client_texcoord.enabled, .size = size, .gl_type = gl_type, .stride = stride, .pointer = pointer, .buffer = bound_array_buffer };
+}
+pub fn multiTexCoord4f(target: GLenum, s: GLfloat, t: GLfloat, r: GLfloat, q: GLfloat) void {
+    if (target < GL_TEXTURE0 or target >= GL_TEXTURE0 + MAX_TEXTURE_UNITS) return setError(GL_INVALID_ENUM);
+    if (recordListCommand(.{ .texcoord = .{ .target = target, .value = .{ s, t, r, q } } })) return;
+    if (target == GL_TEXTURE0) current_texcoord = .{ s, t, r, q };
+}
+
+// ===========================================================================
+// Fixed-function draw pipeline (real GLES1 -> GLES2 translation)
+//
+// A caller that drives geometry through the legacy client arrays + matrix stack
+// (glVertexPointer/glColorPointer/glTexCoordPointer + glDrawArrays, no user
+// shader bound) gets a genuine transformed + textured + fog/alpha-tested draw:
+// on such a draw we lazily compile a GLES2 program that reproduces the classic
+// GL1.x pipeline (MVP transform, per-vertex color modulate, single 2D texture,
+// linear/exp/exp2 fog, alpha test), bind the legacy client arrays as its vertex
+// attributes, upload the matrix stack + fixed state as uniforms, and route the
+// draw through the normal GLES2 HAL path (drawTriangleList).
+// ===========================================================================
+
+// Fixed attribute locations for the fixed-function program.
+const FF_LOC_POS: GLuint = 0;
+const FF_LOC_COLOR: GLuint = 1;
+const FF_LOC_TEXCOORD: GLuint = 2;
+
+const ff_vs_src: [:0]const u8 =
+    \\attribute vec4 a_pos;
+    \\attribute vec4 a_color;
+    \\attribute vec4 a_texcoord;
+    \\uniform mat4 u_mvp;
+    \\uniform mat4 u_mv;
+    \\uniform mat4 u_texmtx;
+    \\uniform int u_fogEnable;
+    \\varying vec4 v_color;
+    \\varying vec4 v_texcoord;
+    \\void main() {
+    \\    gl_Position = u_mvp * a_pos;
+    \\    v_color = a_color;
+    \\    vec4 tc = u_texmtx * a_texcoord;
+    \\    // The fragment entry ABI carries at most 8 interpolated scalars: pack (s, t, q) and
+    \\    // the eye-space fog distance into one vec4 varying as (s, t, q, dist).
+    \\    float dist = 0.0;
+    \\    if (u_fogEnable != 0) {
+    \\        vec4 eye = u_mv * a_pos;
+    \\        dist = abs(eye.z);
+    \\    }
+    \\    v_texcoord = vec4(tc.x, tc.y, tc.w, dist);
+    \\}
+;
+
+const ff_fs_src: [:0]const u8 =
+    \\precision highp float;
+    \\uniform sampler2D u_tex;
+    \\uniform int u_texEnable;
+    \\uniform int u_alphaEnable;
+    \\uniform int u_alphaFunc;
+    \\uniform float u_alphaRef;
+    \\uniform int u_fogEnable;
+    \\uniform int u_fogMode;
+    \\uniform vec4 u_fogColor;
+    \\uniform float u_fogDensity;
+    \\uniform float u_fogStart;
+    \\uniform float u_fogEnd;
+    \\varying vec4 v_color;
+    \\varying vec4 v_texcoord;
+    \\void main() {
+    \\    vec4 c = v_color;
+    \\    if (u_texEnable != 0) {
+    \\        c *= texture2D(u_tex, v_texcoord.xy / v_texcoord.z);
+    \\    }
+    \\    if (u_alphaEnable != 0) {
+    \\        bool pass = true;
+    \\        if (u_alphaFunc == 0x0200) pass = false;
+    \\        else if (u_alphaFunc == 0x0201) pass = c.a < u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0202) pass = c.a == u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0203) pass = c.a <= u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0204) pass = c.a > u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0205) pass = c.a != u_alphaRef;
+    \\        else if (u_alphaFunc == 0x0206) pass = c.a >= u_alphaRef;
+    \\        else pass = true;
+    \\        if (!pass) discard;
+    \\    }
+    \\    if (u_fogEnable != 0) {
+    \\        float f;
+    \\        if (u_fogMode == 0x0800) f = exp(-u_fogDensity * v_texcoord.w);
+    \\        else if (u_fogMode == 0x0801) f = exp(-(u_fogDensity * v_texcoord.w) * (u_fogDensity * v_texcoord.w));
+    \\        else f = (u_fogEnd - v_texcoord.w) / (u_fogEnd - u_fogStart);
+    \\        f = clamp(f, 0.0, 1.0);
+    \\        c.rgb = mix(u_fogColor.rgb, c.rgb, f);
+    \\    }
+    \\    gl_FragColor = c;
+    \\}
+;
+
+// Per-context fixed-function program + cached uniform locations (compiled lazily on the
+// first fixed-function draw in that context). Keyed by the GL program object id.
+const FfUniformState = struct {
+    mv: Mat4,
+    proj: Mat4,
+    texmtx: Mat4,
+    texture: bool,
+    alpha: bool,
+    alpha_func: GLenum,
+    alpha_ref: GLfloat,
+    fog: bool,
+    fog_mode: GLenum,
+    fog_color: [4]f32,
+    fog_density: GLfloat,
+    fog_start: GLfloat,
+    fog_end: GLfloat,
+};
+const FfProgram = struct {
+    program: GLuint = 0,
+    last_uniforms: ?FfUniformState = null,
+    u_mvp: GLint = -1,
+    u_mv: GLint = -1,
+    u_texmtx: GLint = -1,
+    u_tex: GLint = -1,
+    u_texEnable: GLint = -1,
+    u_alphaEnable: GLint = -1,
+    u_alphaFunc: GLint = -1,
+    u_alphaRef: GLint = -1,
+    u_fogEnable: GLint = -1,
+    u_fogMode: GLint = -1,
+    u_fogColor: GLint = -1,
+    u_fogDensity: GLint = -1,
+    u_fogStart: GLint = -1,
+    u_fogEnd: GLint = -1,
+};
+threadlocal var ff_prog: FfProgram = .{};
+
+/// The legacy tracker is loaded into thread-local working state while a context is current.
+/// Keep its persistent copy on the EGL context, including an in-progress list compilation.
+pub const LegacyState = struct {
+    fixed: FixedState = .{},
+    clear_color: ClearColor = .{},
+    viewport: [4]GLint = @splat(0),
+    depth_range: [2]f32 = .{ 0, 1 },
+    line_width: GLfloat = 1,
+    active_texture_unit: u32 = 0,
+    bound_texture_2d: [MAX_TEXTURE_UNITS]GLuint = @splat(0),
+    bound_array_buffer: GLuint = 0,
+    bound_element_buffer: GLuint = 0,
+    mv_stack: MatrixStack = .{},
+    proj_stack: MatrixStack = .{},
+    tex_stack: MatrixStack = .{},
+    matrix_mode: GLenum = GL_MODELVIEW,
+    current_color: [4]f32 = .{ 1, 1, 1, 1 },
+    current_normal: [3]f32 = .{ 0, 0, 1 },
+    shade_model: GLenum = GL_SMOOTH,
+    alpha_func: GLenum = GL_ALWAYS,
+    alpha_ref: GLfloat = 0,
+    fog_mode: GLenum = GL_EXP,
+    fog_density: GLfloat = 1,
+    fog_start: GLfloat = 0,
+    fog_end: GLfloat = 1,
+    fog_color: [4]f32 = @splat(0),
+    ff_texture_2d: [MAX_TEXTURE_UNITS]bool = @splat(false),
+    ff_alpha_test: bool = false,
+    ff_fog: bool = false,
+    ff_lighting: bool = false,
+    current_texcoord: [4]f32 = .{ 0, 0, 0, 1 },
+    client_vertex: ClientArray = .{},
+    client_color: ClientArray = .{},
+    client_texcoord: ClientArray = .{},
+    client_normal: ClientArray = .{},
+    ff_prog: FfProgram = .{},
+    recording_list: GLuint = 0,
+    recording_mode: GLenum = GL_COMPILE,
+    compiling_commands: std.ArrayListUnmanaged(DisplayCommand) = .empty,
+};
+pub fn saveLegacyState(destination: *LegacyState) void {
+    inline for (@typeInfo(LegacyState).@"struct".field_names) |field| {
+        @field(destination, field) = @field(@This(), field);
+    }
+}
+pub fn releaseLegacyState(legacy: *LegacyState) void {
+    if (legacy.ff_prog.program != 0) deleteProgram(legacy.ff_prog.program);
+    for (legacy.compiling_commands.items) |*cmd| freeListCommand(cmd);
+    legacy.compiling_commands.deinit(gpa);
+    legacy.* = .{};
+}
+pub fn restoreLegacyState(source: *const LegacyState) void {
+    inline for (@typeInfo(LegacyState).@"struct".field_names) |field| {
+        @field(@This(), field) = @field(source, field);
+    }
+}
+fn ffUniform(prog: GLuint, name: [:0]const u8) GLint {
+    return getUniformLocation(prog, name.ptr);
+}
+
+/// Compile + link the fixed-function program once per context (thread-local). Returns false
+/// if compilation/linking failed (the draw is then dropped rather than crashing).
+fn ensureFixedFunctionProgram() bool {
+    if (ff_prog.program != 0) return true;
+
+    const vs = createShader(GL_VERTEX_SHADER);
+    defer if (vs != 0) deleteShader(vs);
+    const fs = createShader(GL_FRAGMENT_SHADER);
+    defer if (fs != 0) deleteShader(fs);
+    if (vs == 0 or fs == 0) return false;
+    var vsrc: [1]?[*:0]const GLchar = .{ff_vs_src.ptr};
+    var fsrc: [1]?[*:0]const GLchar = .{ff_fs_src.ptr};
+    shaderSource(vs, 1, &vsrc, null);
+    shaderSource(fs, 1, &fsrc, null);
+    compileShader(vs);
+    compileShader(fs);
+
+    const prog = createProgram();
+    if (prog == 0) return false;
+    attachShader(prog, vs);
+    attachShader(prog, fs);
+    bindAttribLocation(prog, FF_LOC_POS, "a_pos");
+    bindAttribLocation(prog, FF_LOC_COLOR, "a_color");
+    bindAttribLocation(prog, FF_LOC_TEXCOORD, "a_texcoord");
+    linkProgram(prog);
+
+    var linked: GLint = 0;
+    getProgramiv(prog, GL_LINK_STATUS, &linked);
+    if (linked == 0) {
+        deleteProgram(prog);
+        return false;
+    }
+
+    ff_prog = .{
+        .program = prog,
+        .u_mvp = ffUniform(prog, "u_mvp"),
+        .u_mv = ffUniform(prog, "u_mv"),
+        .u_texmtx = ffUniform(prog, "u_texmtx"),
+        .u_tex = ffUniform(prog, "u_tex"),
+        .u_texEnable = ffUniform(prog, "u_texEnable"),
+        .u_alphaEnable = ffUniform(prog, "u_alphaEnable"),
+        .u_alphaFunc = ffUniform(prog, "u_alphaFunc"),
+        .u_alphaRef = ffUniform(prog, "u_alphaRef"),
+        .u_fogEnable = ffUniform(prog, "u_fogEnable"),
+        .u_fogMode = ffUniform(prog, "u_fogMode"),
+        .u_fogColor = ffUniform(prog, "u_fogColor"),
+        .u_fogDensity = ffUniform(prog, "u_fogDensity"),
+        .u_fogStart = ffUniform(prog, "u_fogStart"),
+        .u_fogEnd = ffUniform(prog, "u_fogEnd"),
+    };
+    return true;
+}
+
+/// True when a draw should be handled by the fixed-function pipeline: no user program is
+/// bound and the legacy vertex-position client array is enabled.
+fn fixedFunctionActive() bool {
+    return current_program == 0 and client_vertex.enabled;
+}
+
+// Saved GLES2 attribute-array state, restored after a fixed-function draw so the two paths
+// never leak into each other.
+const SavedAttribs = struct {
+    program: GLuint,
+    slots: [3]AttribArray,
+};
+
+fn ffSlotFrom(ca: ClientArray, generic: [4]f32, normalize_integer: bool) AttribArray {
+    if (ca.enabled) {
+        return .{
+            .enabled = true,
+            .size = ca.size,
+            .gl_type = ca.gl_type,
+            .normalized = normalize_integer and (ca.gl_type == GL_BYTE or ca.gl_type == GL_UNSIGNED_BYTE or ca.gl_type == GL_SHORT or ca.gl_type == GL_UNSIGNED_SHORT or ca.gl_type == GL_INT or ca.gl_type == GL_UNSIGNED_INT),
+            .stride = ca.stride,
+            .offset = @intFromPtr(ca.pointer),
+            .buffer = ca.buffer,
+        };
+    }
+    return .{ .enabled = false, .has_generic = true, .generic = generic };
+}
+
+/// Bind the fixed-function program + client arrays and upload the matrix/state uniforms.
+/// Returns the saved GLES2 state to restore (or null if the FF program failed to build).
+fn beginFixedFunction() ?SavedAttribs {
+    if (!ensureFixedFunctionProgram()) return null;
+
+    const saved = SavedAttribs{
+        .program = current_program,
+        .slots = .{ attribs[FF_LOC_POS], attribs[FF_LOC_COLOR], attribs[FF_LOC_TEXCOORD] },
+    };
+
+    // Position: always from the client vertex array.
+    attribs[FF_LOC_POS] = ffSlotFrom(client_vertex, .{ 0, 0, 0, 1 }, false);
+    // Color: per-vertex array, else the current glColor4f constant.
+    attribs[FF_LOC_COLOR] = ffSlotFrom(client_color, current_color, true);
+    // Texcoord: per-vertex array, else the current glMultiTexCoord4f constant.
+    attribs[FF_LOC_TEXCOORD] = ffSlotFrom(client_texcoord, current_texcoord, false);
+
+    current_program = ff_prog.program;
+
+    const uniforms = FfUniformState{
+        .mv = mv_stack.current().*,
+        .proj = proj_stack.current().*,
+        .texmtx = tex_stack.current().*,
+        .texture = ff_texture_2d[0] and bound_texture_2d[0] != 0,
+        .alpha = ff_alpha_test,
+        .alpha_func = if (ff_alpha_test) alpha_func else GL_ALWAYS,
+        .alpha_ref = if (ff_alpha_test) alpha_ref else 0,
+        .fog = ff_fog,
+        .fog_mode = if (ff_fog) fog_mode else GL_EXP,
+        .fog_color = if (ff_fog) fog_color else @splat(0),
+        .fog_density = if (ff_fog) fog_density else 1,
+        .fog_start = if (ff_fog) fog_start else 0,
+        .fog_end = if (ff_fog) fog_end else 1,
+    };
+    if (ff_prog.last_uniforms) |previous| {
+        if (std.meta.eql(previous, uniforms)) return saved;
+    }
+    ff_prog.last_uniforms = uniforms;
+    // MVP = projection * modelview; also pass modelview alone for eye-space fog distance.
+    const mv = mv_stack.current().*;
+    const proj = proj_stack.current().*;
+    const mvp = mat4Mul(proj, mv);
+    uniformMatrix4fv(ff_prog.u_mvp, 1, GL_FALSE, &mvp);
+    uniformMatrix4fv(ff_prog.u_mv, 1, GL_FALSE, &mv);
+    uniformMatrix4fv(ff_prog.u_texmtx, 1, GL_FALSE, tex_stack.current());
+
+    const tex_on = ff_texture_2d[0] and bound_texture_2d[0] != 0;
+    uniform1i(ff_prog.u_tex, 0);
+    uniform1i(ff_prog.u_texEnable, if (tex_on) 1 else 0);
+
+    uniform1i(ff_prog.u_alphaEnable, if (ff_alpha_test) 1 else 0);
+    uniform1i(ff_prog.u_alphaFunc, @intCast(alpha_func));
+    uniform1f(ff_prog.u_alphaRef, alpha_ref);
+
+    uniform1i(ff_prog.u_fogEnable, if (ff_fog) 1 else 0);
+    uniform1i(ff_prog.u_fogMode, @intCast(fog_mode));
+    uniform4f(ff_prog.u_fogColor, fog_color[0], fog_color[1], fog_color[2], fog_color[3]);
+    uniform1f(ff_prog.u_fogDensity, fog_density);
+    uniform1f(ff_prog.u_fogStart, fog_start);
+    uniform1f(ff_prog.u_fogEnd, fog_end);
+
+    return saved;
+}
+
+fn endFixedFunction(saved: SavedAttribs) void {
+    current_program = saved.program;
+    attribs[FF_LOC_POS] = saved.slots[0];
+    attribs[FF_LOC_COLOR] = saved.slots[1];
+    attribs[FF_LOC_TEXCOORD] = saved.slots[2];
+}
+/// Display lists record supported fixed-function state commands and array draws. Array data is
+/// copied at compilation so replay never depends on the lifetime of client pointers or later VBO
+/// mutations. Unsupported commands are not silently claimed as implemented.
+const ListArray = struct {
+    enabled: bool = false,
+    size: GLint = 4,
+    gl_type: GLenum = GL_FLOAT,
+    stride: GLsizei = 0,
+    bytes: []u8 = &.{},
+};
+const DrawArraysListCommand = struct {
+    mode: GLenum,
+    first: GLint,
+    count: GLsizei,
+    arrays: [3]ListArray,
+};
+const DisplayCommand = union(enum) {
+    matrix_mode: GLenum,
+    load_identity,
+    push_matrix,
+    pop_matrix,
+    load_matrix: Mat4,
+    mult_matrix: Mat4,
+    translate: [3]f32,
+    scale: [3]f32,
+    rotate: [4]f32,
+    color: [4]f32,
+    normal: [3]f32,
+    shade_model: GLenum,
+    alpha: struct { func: GLenum, ref: GLfloat },
+    fog: struct { pname: GLenum, value: [4]f32 },
+    texcoord: struct { target: GLenum, value: [4]f32 },
+    active_texture: GLenum,
+    bind_texture: struct { target: GLenum, texture: GLuint },
+    clear_color: [4]f32,
+    clear: GLbitfield,
+    viewport: [4]GLint,
+    scissor: [4]GLint,
+    depth_func: GLenum,
+    depth_mask: GLboolean,
+    depth_range: [2]f32,
+    cull_face: GLenum,
+    front_face: GLenum,
+    blend_func: [2]GLenum,
+    color_mask: [4]GLboolean,
+    line_width: GLfloat,
+    polygon_offset: [2]GLfloat,
+    stencil_func: struct { func: GLenum, ref: GLint, mask: GLuint },
+    stencil_op: [3]GLenum,
+    stencil_mask: GLuint,
+    enable: GLenum,
+    disable: GLenum,
+    draw_arrays: DrawArraysListCommand,
+    call_list: GLuint,
+};
+// Immutable published command streams are retained while replaying. Deletion or
+// replacement can release the registry's reference without copying geometry per call.
+const ListBody = struct {
+    refs: usize = 1, // protected by defined_lists_lock
+    commands: std.ArrayListUnmanaged(DisplayCommand) = .empty,
+};
+const DisplayList = struct { body: ?*ListBody = null };
+threadlocal var compiling_commands: std.ArrayListUnmanaged(DisplayCommand) = .empty;
+
+var next_list_id: GLuint = 1;
+threadlocal var recording_list: GLuint = 0;
+threadlocal var recording_mode: GLenum = GL_COMPILE;
+threadlocal var list_replay_depth: u32 = 0;
+var defined_lists: std.AutoHashMapUnmanaged(GLuint, DisplayList) = .empty;
+var defined_lists_lock: SpinLock = .{};
+
+fn freeListCommand(cmd: *DisplayCommand) void {
+    switch (cmd.*) {
+        .draw_arrays => |*d| for (&d.arrays) |*a| if (a.bytes.len != 0) gpa.free(a.bytes),
+        else => {},
+    }
+}
+fn releaseListBody(body: *ListBody) void {
+    body.refs -= 1;
+    if (body.refs != 0) return;
+    for (body.commands.items) |*cmd| freeListCommand(cmd);
+    body.commands.deinit(gpa);
+    gpa.destroy(body);
+}
+fn destroyDisplayList(list: *DisplayList) void {
+    if (list.body) |body| releaseListBody(body);
+    list.* = .{};
+}
+fn captureListDraw(mode: GLenum, indices: []const u32) !DisplayCommand {
+    var draw = DrawArraysListCommand{ .mode = mode, .first = 0, .count = @intCast(indices.len), .arrays = @splat(.{}) };
+    errdefer for (&draw.arrays) |*a| if (a.bytes.len != 0) gpa.free(a.bytes);
+    const clients = .{ client_vertex, client_color, client_texcoord };
+    obj_lock.lock();
+    defer obj_lock.unlock();
+    inline for (0..3) |slot| {
+        const ca = clients[slot];
+        if (ca.enabled) {
+            if (ca.size < 1 or ca.size > 4 or ca.stride < 0) return error.InvalidArray;
+            const component_size = attribTypeSize(ca.gl_type);
+            if (component_size == 0) return error.InvalidArray;
+            const element_bytes: usize = @as(usize, @intCast(ca.size)) * component_size;
+            const stride: usize = if (ca.stride == 0) element_bytes else @intCast(ca.stride);
+            const bytes = try gpa.alloc(u8, try std.math.mul(usize, indices.len, element_bytes));
+            draw.arrays[slot] = .{ .enabled = true, .size = ca.size, .gl_type = ca.gl_type, .stride = 0, .bytes = bytes };
+            for (indices, 0..) |index, i| {
+                const off = try std.math.mul(usize, index, stride);
+                const source_offset = try std.math.add(usize, @intFromPtr(ca.pointer), off);
+                if (ca.buffer != 0) {
+                    const buf = findBuffer(ca.buffer) orelse return error.InvalidArray;
+                    if (source_offset > buf.bytes.items.len or element_bytes > buf.bytes.items.len - source_offset) return error.InvalidArray;
+                    @memcpy(bytes[i * element_bytes ..][0..element_bytes], buf.bytes.items[source_offset..][0..element_bytes]);
+                } else {
+                    if (ca.pointer == null) return error.InvalidArray;
+                    @memcpy(bytes[i * element_bytes ..][0..element_bytes], @as([*]const u8, @ptrFromInt(source_offset))[0..element_bytes]);
+                }
+            }
+        }
+    }
+    return .{ .draw_arrays = draw };
+}
+fn recordArrayDraw(mode: GLenum, first: GLint, count: GLsizei) bool {
+    if (recording_list == 0 or list_replay_depth != 0) return false;
+    if (!client_vertex.enabled or current_program != 0) {
+        setError(GL_INVALID_OPERATION);
+        return true;
+    }
+    const indices = gpa.alloc(u32, @intCast(count)) catch {
+        setError(GL_OUT_OF_MEMORY);
+        return true;
+    };
+    defer gpa.free(indices);
+    for (indices, 0..) |*index, i| index.* = @as(u32, @intCast(first)) + @as(u32, @intCast(i));
+    const cmd = captureListDraw(mode, indices) catch |err| {
+        setError(if (err == error.OutOfMemory) GL_OUT_OF_MEMORY else GL_INVALID_OPERATION);
+        return true;
+    };
+    return recordListCommand(cmd);
+}
+
+fn recordListCommand(cmd: DisplayCommand) bool {
+    if (recording_list == 0 or list_replay_depth != 0) return false;
+    compiling_commands.append(gpa, cmd) catch {
+        var owned = cmd;
+        freeListCommand(&owned);
+        setError(GL_OUT_OF_MEMORY);
+        return true;
+    };
+    return recording_mode == GL_COMPILE;
+}
+
+pub fn genLists(range: GLsizei) GLuint {
+    if (range < 0) {
+        setError(GL_INVALID_VALUE);
+        return 0;
+    }
+    if (range == 0) return 0;
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    const amount: GLuint = @intCast(range);
+    var first: GLuint = next_list_id;
+    while (true) {
+        if (first == 0 or amount - 1 > std.math.maxInt(GLuint) - first) return 0;
+        var i: GLuint = 0;
+        while (i < amount and !defined_lists.contains(first + i)) : (i += 1) {}
+        if (i == amount) break;
+        first = std.math.add(GLuint, first, i + 1) catch return 0;
+    }
+    var i: GLuint = 0;
+    while (i < amount) : (i += 1) {
+        defined_lists.put(gpa, first + i, .{}) catch {
+            var j: GLuint = 0;
+            while (j < i) : (j += 1) _ = defined_lists.remove(first + j);
+            setError(GL_OUT_OF_MEMORY);
+            return 0;
+        };
+    }
+    next_list_id = std.math.add(GLuint, first, amount) catch 0;
+    return first;
+}
+pub fn isList(list: GLuint) GLboolean {
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    const entry = defined_lists.get(list) orelse return GL_FALSE;
+    return if (entry.body != null) GL_TRUE else GL_FALSE;
+}
+pub fn newList(list: GLuint, mode: GLenum) void {
+    if (recording_list != 0) return setError(GL_INVALID_OPERATION);
+    if (list == 0) return setError(GL_INVALID_VALUE);
+    if (mode != GL_COMPILE and mode != GL_COMPILE_AND_EXECUTE) return setError(GL_INVALID_ENUM);
+    // Ensure publishing at glEndList cannot fail. Keep the previous definition live
+    // until compilation ends, including for self-calls during COMPILE_AND_EXECUTE.
+    defined_lists_lock.lock();
+    _ = defined_lists.getOrPutValue(gpa, list, .{}) catch {
+        defined_lists_lock.unlock();
+        return setError(GL_OUT_OF_MEMORY);
+    };
+    defined_lists_lock.unlock();
+    recording_list = list;
+    recording_mode = mode;
+    compiling_commands = .empty;
+}
+pub fn endList() void {
+    if (recording_list == 0) return setError(GL_INVALID_OPERATION);
+    const body = gpa.create(ListBody) catch return setError(GL_OUT_OF_MEMORY);
+    body.* = .{ .commands = compiling_commands };
+    defined_lists_lock.lock();
+    const entry = defined_lists.getOrPutValue(gpa, recording_list, .{}) catch {
+        defined_lists_lock.unlock();
+        gpa.destroy(body); // compilation retains ownership for a retry
+        return setError(GL_OUT_OF_MEMORY);
+    };
+    destroyDisplayList(entry.value_ptr);
+    entry.value_ptr.* = .{ .body = body };
+    defined_lists_lock.unlock();
+    compiling_commands = .empty;
+    recording_list = 0;
+}
+fn executeDisplayCommand(cmd: DisplayCommand) void {
+    switch (cmd) {
+        .matrix_mode => |m| matrix_mode = m,
+        .load_identity => loadIdentity(),
+        .push_matrix => pushMatrix(),
+        .pop_matrix => popMatrix(),
+        .load_matrix => |m| activeStack().current().* = m,
+        .mult_matrix => |m| {
+            const cur = activeStack().current();
+            cur.* = mat4Mul(cur.*, m);
+        },
+        .translate => |v| translatef(v[0], v[1], v[2]),
+        .scale => |v| scalef(v[0], v[1], v[2]),
+        .rotate => |v| rotatef(v[0], v[1], v[2], v[3]),
+        .color => |v| current_color = v,
+        .normal => |v| normal3f(v[0], v[1], v[2]),
+        .shade_model => |m| shadeModel(m),
+        .alpha => |a| alphaFunc(a.func, a.ref),
+        .fog => |f| fogfv(f.pname, &f.value),
+        .texcoord => |t| multiTexCoord4f(t.target, t.value[0], t.value[1], t.value[2], t.value[3]),
+        .active_texture => |t| activeTexture(t),
+        .bind_texture => |t| bindTexture(t.target, t.texture),
+        .clear_color => |v| clearColor(v[0], v[1], v[2], v[3]),
+        .clear => |mask| clear(mask),
+        .viewport => |v| setViewport(v[0], v[1], v[2], v[3]),
+        .scissor => |v| setScissorBox(v[0], v[1], v[2], v[3]),
+        .depth_func => |f| depthFunc(f),
+        .depth_mask => |m| depthMask(m),
+        .depth_range => |v| depthRangef(v[0], v[1]),
+        .cull_face => |f| cullFace(f),
+        .front_face => |f| frontFace(f),
+        .blend_func => |v| blendFunc(v[0], v[1]),
+        .color_mask => |v| colorMask(v[0], v[1], v[2], v[3]),
+        .line_width => |w| setLineWidth(w),
+        .polygon_offset => |v| polygonOffset(v[0], v[1]),
+        .stencil_func => |s| stencilFunc(s.func, s.ref, s.mask),
+        .stencil_op => |s| stencilOp(s[0], s[1], s[2]),
+        .stencil_mask => |m| stencilMask(m),
+        .enable => |cap| setCap(cap, true),
+        .disable => |cap| setCap(cap, false),
+        .call_list => |id| callList(id),
+        .draw_arrays => |d| {
+            const saved = .{ client_vertex, client_color, client_texcoord };
+            inline for (.{ 0, 1, 2 }) |i| {
+                const a = d.arrays[i];
+                const ptr: ?*const anyopaque = if (a.bytes.len == 0) null else @ptrCast(a.bytes.ptr);
+                const replacement = ClientArray{ .enabled = a.enabled, .size = a.size, .gl_type = a.gl_type, .stride = a.stride, .pointer = ptr };
+                if (i == 0) client_vertex = replacement else if (i == 1) client_color = replacement else client_texcoord = replacement;
+            }
+            drawArrays(d.mode, d.first, d.count);
+            client_vertex = saved[0];
+            client_color = saved[1];
+            client_texcoord = saved[2];
+        },
+    }
+}
+pub fn callList(list_id: GLuint) void {
+    if (recording_list != 0 and list_replay_depth == 0) {
+        if (recordListCommand(.{ .call_list = list_id })) return;
+    }
+    if (list_replay_depth >= 64) {
+        setError(GL_INVALID_OPERATION);
+        return;
+    }
+    defined_lists_lock.lock();
+    const body = if (defined_lists.get(list_id)) |entry| entry.body else null;
+    if (body) |stream| stream.refs += 1;
+    defined_lists_lock.unlock();
+    const stream = body orelse return;
+    defer {
+        defined_lists_lock.lock();
+        releaseListBody(stream);
+        defined_lists_lock.unlock();
+    }
+    list_replay_depth += 1;
+    defer list_replay_depth -= 1;
+    for (stream.commands.items) |cmd| executeDisplayCommand(cmd);
+}
+pub fn deleteLists(list_id: GLuint, range: GLsizei) void {
+    if (range < 0) return setError(GL_INVALID_VALUE);
+    if (range == 0) return;
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    var i: GLuint = 0;
+    while (i < @as(GLuint, @intCast(range)) and i <= std.math.maxInt(GLuint) - list_id) : (i += 1) {
+        if (defined_lists.fetchRemove(list_id + i)) |entry| {
+            var list = entry.value;
+            destroyDisplayList(&list);
+        }
+    }
+}
 // --- Tests ------------------------------------------------------------------
 
+test "EGL GLES1 renderability is discoverable without claiming conformance" {
+    const egl = @import("egl.zig");
+    const bits = state.configs[0].attrib(egl.EGL_RENDERABLE_TYPE).?;
+    try std.testing.expect((bits & egl.EGL_OPENGL_ES_BIT) != 0);
+    const conformant = state.configs[0].attrib(egl.EGL_CONFORMANT).?;
+    try std.testing.expect((conformant & egl.EGL_OPENGL_ES_BIT) == 0);
+}
 test "boxDownsample averages each 2x2 block per channel (mip generation)" {
     // A 2x2 RGBA8 source: R=(0,100,200,255) in raster order across one channel. The 1x1 dst is
     // the average. Build distinct per-channel values to catch a channel mix-up.
@@ -9261,4 +10448,276 @@ test "a failed glLinkProgram populates glGetProgramInfoLog (the reason reaches t
     getProgramInfoLog(prog, buf.len, &written, &buf);
     try std.testing.expect(written > 0);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..@intCast(written)], "vertex shader") != null);
+}
+
+test "legacy fixed-function pointers capture their array buffer and reset on context switch" {
+    resetThreadState();
+    bound_array_buffer = 77;
+    vertexPointer(3, GL_FLOAT, 12, @ptrFromInt(16));
+    try std.testing.expectEqual(@as(GLuint, 77), client_vertex.buffer);
+    try std.testing.expectEqual(@as(usize, 16), @intFromPtr(client_vertex.pointer));
+    current_color = .{ 0.2, 0.3, 0.4, 0.5 };
+    mv_stack.current()[12] = 9;
+    resetThreadState();
+    try std.testing.expectEqual(@as(GLuint, 0), client_vertex.buffer);
+    try std.testing.expectEqual(@as(f32, 1), current_color[0]);
+    try std.testing.expectEqual(@as(f32, 0), mv_stack.current()[12]);
+}
+
+test "integer legacy color array conversion normalizes unsigned bytes" {
+    const src = [_]u8{ 0, 128, 255, 255 };
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), readAttribF32(&src, 1, GL_UNSIGNED_BYTE, true), 0.0001);
+}
+
+test "legacy state survives switching between independent contexts" {
+    resetThreadState();
+    defer resetThreadState();
+    var a: LegacyState = .{};
+    const b: LegacyState = .{};
+    translatef(7, 8, 9);
+    color4f(0.1, 0.2, 0.3, 0.4);
+    saveLegacyState(&a);
+    restoreLegacyState(&b);
+    try std.testing.expectEqual(mat4_identity, mv_stack.current().*);
+    restoreLegacyState(&a);
+    try std.testing.expectEqual(@as(f32, 7), mv_stack.current()[12]);
+    try std.testing.expectEqual(@as(f32, 0.4), current_color[3]);
+}
+
+test "client indices are read relative to the client pointer" {
+    resetThreadState();
+    defer resetThreadState();
+    const indices = [_]u16{ 0, 1, 2 };
+    drawElements(GL_TRIANGLES, indices.len, GL_UNSIGNED_SHORT, @intFromPtr(&indices));
+    // There is no current context; reaching draw submission rather than rejecting the
+    // index source is observable through the expanded index scratch buffer.
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, draw_indices.items);
+    _ = getError();
+}
+
+test "legacy attribute translation normalizes colors but not positions" {
+    const array = ClientArray{ .enabled = true, .gl_type = GL_UNSIGNED_BYTE, .buffer = 23 };
+    const color = ffSlotFrom(array, @splat(0), true);
+    const pos = ffSlotFrom(array, @splat(0), false);
+    try std.testing.expect(color.normalized);
+    try std.testing.expect(!pos.normalized);
+    try std.testing.expectEqual(@as(GLuint, 23), pos.buffer);
+}
+
+test "display lists compile, replay, replace, delete, and bound nested calls" {
+    resetThreadState();
+    defer resetThreadState();
+    const id = genLists(2);
+    try std.testing.expect(id != 0);
+    defer deleteLists(id, 2);
+    newList(id, GL_COMPILE);
+    translatef(2, 3, 4);
+    color4f(0.2, 0.3, 0.4, 0.5);
+    endList();
+    try std.testing.expectEqual(@as(f32, 0), mv_stack.current()[12]);
+    callList(id);
+    try std.testing.expectEqual(@as(f32, 2), mv_stack.current()[12]);
+    try std.testing.expectEqual(@as(f32, 0.5), current_color[3]);
+    newList(id + 1, GL_COMPILE_AND_EXECUTE);
+    callList(id);
+    endList();
+    try std.testing.expectEqual(@as(f32, 4), mv_stack.current()[12]);
+    callList(id + 1);
+    try std.testing.expectEqual(@as(f32, 6), mv_stack.current()[12]);
+    newList(id, GL_COMPILE);
+    callList(id);
+    endList();
+    callList(id);
+    try std.testing.expectEqual(GL_INVALID_OPERATION, getError());
+    deleteLists(id, 1);
+    callList(id);
+    try std.testing.expectEqual(GL_NO_ERROR, getError());
+}
+
+test "display list array capture owns data independent of client and VBO mutations" {
+    resetThreadState();
+    defer resetThreadState();
+    const id = genLists(1);
+    defer deleteLists(id, 1);
+    var vertices = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    vertexPointer(3, GL_FLOAT, 0, @ptrCast(&vertices));
+    enableClientState(GL_VERTEX_ARRAY);
+    newList(id, GL_COMPILE);
+    drawArrays(GL_POINTS, 1, 1);
+    endList();
+    vertices[3] = 99;
+    defined_lists_lock.lock();
+    const cmd = defined_lists.get(id).?.body.?.commands.items[0].draw_arrays;
+    try std.testing.expectEqual(@as(f32, 4), std.mem.bytesToValue(f32, cmd.arrays[0].bytes[0..4]));
+    defined_lists_lock.unlock();
+}
+
+test "fixed-function display list renders after source data changes" {
+    const egl = @import("egl.zig");
+    const display = state.getPlatformDisplay(egl.EGL_PLATFORM_SURFACELESS_MESA, null).?;
+    try state.initialize(display);
+    defer state.terminate(display);
+    const ctx = try state.createContext(display, 0, egl.EGL_OPENGL_ES_API);
+    defer ctx.deinit();
+    const surface = try state.createPbufferSurface(display, 0, 16, 16);
+    defer surface.deinit();
+    state.makeCurrent(ctx, surface, surface);
+    defer state.makeCurrent(null, null, null);
+    resetThreadState();
+    defer {
+        saveLegacyState(&ctx.legacy);
+        resetThreadState();
+    }
+    setViewport(0, 0, 16, 16);
+    clearColor(0, 0, 0, 1);
+    clear(GL_COLOR_BUFFER_BIT);
+    var vertices = [_]f32{ -1, -1, 0, 1, -1, 0, 0, 1, 0 };
+    vertexPointer(3, GL_FLOAT, 0, @ptrCast(&vertices));
+    enableClientState(GL_VERTEX_ARRAY);
+    const id = genLists(1);
+    defer deleteLists(id, 1);
+    newList(id, GL_COMPILE);
+    color4f(1, 0, 0, 1);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    endList();
+    @memset(&vertices, 100);
+    callList(id);
+    try std.testing.expectEqual(GL_NO_ERROR, getError());
+    const internal = findProgram(ff_prog.program).?;
+    // The fixed-function FS samples a texture and discards for alpha test, so the JIT entry
+    // takes five pointer params (UBO, sampler descriptor, sampler_fn, grad_buf, discard_fn).
+    // The pixel reads below are the regression for that cap: passing more params than
+    // `spirv_jit.GfxBuffers.max` (now 5) put the output pointer in the wrong register and
+    // segfaulted in optimized builds even though debug happened to work.
+    try std.testing.expect(!internal.uniform_dirty);
+    const saved_attributes = beginFixedFunction().?;
+    endFixedFunction(saved_attributes);
+    try std.testing.expect(!internal.uniform_dirty); // unchanged draw state uploads nothing
+    var pixel: [4]u8 = @splat(0);
+    readPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &pixel);
+    try std.testing.expectEqual(GL_NO_ERROR, getError());
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, pixel);
+    clearColor(0, 0, 0, 1);
+    clear(GL_COLOR_BUFFER_BIT);
+    enable(GL_ALPHA_TEST);
+    alphaFunc(GL_NEVER, 0);
+    callList(id);
+    readPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &pixel);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 255 }, pixel);
+}
+
+test "fixed-function textured draw uses default q=1 for 2D texcoord arrays" {
+    const egl = @import("egl.zig");
+    const display = state.getPlatformDisplay(egl.EGL_PLATFORM_SURFACELESS_MESA, null).?;
+    try state.initialize(display);
+    defer state.terminate(display);
+    const ctx = try state.createContext(display, 0, egl.EGL_OPENGL_ES_API);
+    defer ctx.deinit();
+    const surface = try state.createPbufferSurface(display, 0, 16, 16);
+    defer surface.deinit();
+    state.makeCurrent(ctx, surface, surface);
+    defer state.makeCurrent(null, null, null);
+    resetThreadState();
+    defer {
+        saveLegacyState(&ctx.legacy);
+        resetThreadState();
+    }
+    setViewport(0, 0, 16, 16);
+    clearColor(0, 0, 0, 1);
+    clear(GL_COLOR_BUFFER_BIT);
+    var tex: GLuint = 0;
+    genTextures(1, @ptrCast(&tex));
+    bindTexture(GL_TEXTURE_2D, tex);
+    const texels = [_]u8{ 255, 0, 0, 255, 0, 0, 255, 255 };
+    texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &texels);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    enable(GL_TEXTURE_2D);
+    const verts = [_]f32{ -1, -1, 3, -1, -1, 3 };
+    const uvs = [_]f32{ 0, 0, 2, 0, 0, 2 }; // u in [0,2) over the viewport -> both texels
+    vertexPointer(2, GL_FLOAT, 0, @ptrCast(&verts));
+    texCoordPointer(2, GL_FLOAT, 0, @ptrCast(&uvs));
+    enableClientState(GL_VERTEX_ARRAY);
+    enableClientState(GL_TEXTURE_COORD_ARRAY);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    try std.testing.expectEqual(GL_NO_ERROR, getError());
+    var left: [4]u8 = @splat(0);
+    var right: [4]u8 = @splat(0);
+    readPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &left);
+    readPixels(12, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &right);
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, left);
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, right);
+}
+
+test "display list indexed VBO capture and reserved names" {
+    resetThreadState();
+    defer resetThreadState();
+    const id = genLists(1);
+    defer deleteLists(id, 1);
+    try std.testing.expectEqual(GL_FALSE, isList(id));
+    var buffer: GLuint = 0;
+    genBuffers(1, @ptrCast(&buffer));
+    defer deleteBuffers(1, @ptrCast(&buffer));
+    const vertices = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    bindBuffer(GL_ARRAY_BUFFER, buffer);
+    bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), &vertices, GL_STATIC_DRAW);
+    vertexPointer(3, GL_FLOAT, 0, null);
+    enableClientState(GL_VERTEX_ARRAY);
+    const indices = [_]u8{ 1, 0 };
+    newList(id, GL_COMPILE);
+    drawElements(GL_LINES, 2, GL_UNSIGNED_BYTE, @intFromPtr(&indices));
+    endList();
+    try std.testing.expectEqual(GL_NO_ERROR, getError());
+    try std.testing.expectEqual(GL_TRUE, isList(id));
+    bufferData(GL_ARRAY_BUFFER, 0, null, GL_STATIC_DRAW);
+    defined_lists_lock.lock();
+    defer defined_lists_lock.unlock();
+    const draw = defined_lists.get(id).?.body.?.commands.items[0].draw_arrays;
+    try std.testing.expectEqual(@as(f32, 4), std.mem.bytesToValue(f32, draw.arrays[0].bytes[0..4]));
+    try std.testing.expectEqual(@as(f32, 1), std.mem.bytesToValue(f32, draw.arrays[0].bytes[12..16]));
+}
+
+test "failed fixed-function setup releases temporary shader and program objects" {
+    resetThreadState();
+    defer resetThreadState();
+    const old_shaders = shaders.items.len;
+    const old_programs = programs.items.len;
+    try std.testing.expect(!ensureFixedFunctionProgram()); // linking requires a current context
+    try std.testing.expectEqual(old_shaders, shaders.items.len);
+    try std.testing.expectEqual(old_programs, programs.items.len);
+    _ = getError();
+}
+
+test "retained display-list stream survives deletion without geometry cloning" {
+    resetThreadState();
+    defer resetThreadState();
+    const id = genLists(1);
+    newList(id, GL_COMPILE);
+    translatef(5, 0, 0);
+    endList();
+    defined_lists_lock.lock();
+    const body = defined_lists.get(id).?.body.?;
+    body.refs += 1; // same pin used by glCallList
+    defined_lists_lock.unlock();
+    deleteLists(id, 1);
+    try std.testing.expectEqual(GL_FALSE, isList(id));
+    try std.testing.expectEqual(@as(usize, 1), body.refs);
+    list_replay_depth += 1;
+    executeDisplayCommand(body.commands.items[0]);
+    list_replay_depth -= 1;
+    try std.testing.expectEqual(@as(f32, 5), mv_stack.current()[12]);
+    defined_lists_lock.lock();
+    releaseListBody(body);
+    defined_lists_lock.unlock();
+}
+
+test "quad expansion reserves space and ignores incomplete trailing vertices" {
+    var indices: std.ArrayListUnmanaged(u32) = .empty;
+    defer indices.deinit(gpa);
+    const n = buildArrayIndices(GL_QUADS, 2, 7, &indices).?;
+    try std.testing.expectEqual(@as(usize, 6), n);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4, 2, 4, 5 }, indices.items);
+    const capacity = indices.capacity;
+    _ = buildArrayIndices(GL_QUADS, 2, 7, &indices);
+    try std.testing.expectEqual(capacity, indices.capacity);
 }

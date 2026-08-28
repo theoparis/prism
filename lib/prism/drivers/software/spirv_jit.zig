@@ -90,11 +90,13 @@ pub const GfxBuffers = struct {
     /// The maximum number of uniform/storage/sampler-descriptor/helper pointer params we
     /// route into a graphics shader (vulcan lowers each UBO/SSBO, each combined-image-
     /// sampler, the host sampler_fn, the grad_buf, and the host math_fn to one pointer entry
-    /// param). `runGraphics` provides concrete call signatures for up to 4 such pointers -
-    /// vkcube's fragment shader needs all four (sampler descriptor + sampler_fn + grad_buf +
-    /// math_fn). A shader needing more JIT-runs as TooManyInputs and the draw produces
-    /// nothing (a documented limit).
-    pub const max: usize = 4;
+    /// param). `runGraphics` provides concrete call signatures for up to `max` such pointers.
+    /// vkcube's fragment shader needs four (sampler descriptor + sampler_fn + grad_buf +
+    /// math_fn); fixed-function GLES texturing plus alpha test needs five (the FS UBO, the
+    /// sampler descriptor, sampler_fn and grad_buf for `texture2D`, and the `discard` thunk).
+    /// A shader needing more JIT-runs as TooManyInputs and the draw produces nothing
+    /// (a documented limit).
+    pub const max: usize = 5;
 };
 
 /// The maximum number of screen-space-derivative (dFdx/dFdy/Fwidth) gradient-buffer slots
@@ -835,6 +837,9 @@ const QP = [*]const u8;
 /// it the error is still the honest answer.
 pub const max_gfx_inputs: usize = 16;
 
+/// True where the host C ABI packs stack-passed scalars (Apple arm64) unlike the JIT's AAPCS64.
+const darwin_stack_slots = @import("builtin").cpu.arch == .aarch64 and @import("builtin").os.tag.isDarwin();
+
 /// The C ABI signature of a JITed graphics entry: `nf` value parameters, then
 /// `nb` pointer parameters, then the output pointer.
 ///
@@ -845,7 +850,7 @@ fn GfxSig(comptime Value: type, comptime Ptr: type, comptime Out: type, comptime
     @setEvalBranchQuota(100_000);
     const types = comptime blk: {
         var t: [nf + nb + 1]type = undefined;
-        for (t[0..nf]) |*e| e.* = Value;
+        for (t[0..nf], 0..) |*e, i| e.* = if (darwin_stack_slots and Value == f32 and i >= 8) f64 else Value;
         for (t[nf..][0..nb]) |*e| e.* = Ptr;
         t[nf + nb] = Out;
         break :blk t;
@@ -866,7 +871,15 @@ fn invokeGfx(
     out: anytype,
 ) void {
     var args: std.meta.ArgsTuple(@typeInfo(Sig).pointer.child) = undefined;
-    inline for (0..nf) |i| args[i] = values[i];
+    inline for (0..nf) |i| {
+        // Apple arm64 packs stack-passed f32 args to 4 bytes, but the JIT (plain AAPCS64)
+        // reads 8-byte stack slots. Past v7 send each f32 as an f64 whose low 32 bits hold
+        // the f32 bits, which occupies exactly one 8-byte slot.
+        if (@TypeOf(args[i]) == f64) {
+            const bits: u32 = @bitCast(values[i]);
+            args[i] = @bitCast(@as(u64, bits));
+        } else args[i] = values[i];
+    }
     inline for (0..nb) |i| args[nf + i] = ptrs[i];
     args[nf + nb] = out;
     @call(.auto, f, args);
@@ -2239,7 +2252,13 @@ test "a graphics entry takes more than eight inputs, in order" {
     // the same either way, and this is the part that was broken. Twelve also
     // reaches past AArch64's eight SIMD argument registers, so inputs 9 to 12
     // arrive on the stack, which is the case worth pinning.
+    // The JIT reads stack-passed args as 8-byte slots; on Apple arm64 callers send f32 past v7
+    // as f64 carrying the f32 bits (see GfxSig), so the stand-in declares them the same way.
+    const S = if (darwin_stack_slots) f64 else f32;
     const Entry = struct {
+        fn un(v: S) f32 {
+            return if (S == f64) @bitCast(@as(u32, @truncate(@as(u64, @bitCast(v))))) else v;
+        }
         fn f(
             a0: f32,
             a1: f32,
@@ -2249,13 +2268,13 @@ test "a graphics entry takes more than eight inputs, in order" {
             a5: f32,
             a6: f32,
             a7: f32,
-            a8: f32,
-            a9: f32,
-            a10: f32,
-            a11: f32,
+            a8: S,
+            a9: S,
+            a10: S,
+            a11: S,
             out: O,
         ) callconv(.c) void {
-            const all = [_]f32{ a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11 };
+            const all = [_]f32{ a0, a1, a2, a3, a4, a5, a6, a7, un(a8), un(a9), un(a10), un(a11) };
             for (all, 0..) |v, i| out[i] = v;
         }
     };

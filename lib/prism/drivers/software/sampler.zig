@@ -169,8 +169,8 @@ pub fn sampleTextureShadow(desc: *const TexDesc, u: f32, v: f32, req_lod: f32, d
     if (lw == 0 or lh == 0) return 0; // unbound sampler: fully occluded (defined, no crash)
     // The mag/min filter decides single-tap vs PCF. Either being linear enables PCF.
     if (desc.filter != .linear and desc.min_filter != .linear) {
-        const x = wrap(@intFromFloat(@floor(u * @as(f32, @floatFromInt(lw)))), lw, desc.address_u);
-        const y = wrap(@intFromFloat(@floor(v * @as(f32, @floatFromInt(lh)))), lh, desc.address_v);
+        const x = wrap(coordInt(@floor(u * @as(f32, @floatFromInt(lw)))), lw, desc.address_u);
+        const y = wrap(coordInt(@floor(v * @as(f32, @floatFromInt(lh)))), lh, desc.address_v);
         var t: [4]f32 = undefined;
         texel(desc, 0, lw, x, y, &t);
         return compareDepth(desc.compare_op, dref, t[0]);
@@ -182,8 +182,8 @@ pub fn sampleTextureShadow(desc: *const TexDesc, u: f32, v: f32, req_lod: f32, d
     const y0f = @floor(sy);
     const fx = sx - x0f;
     const fy = sy - y0f;
-    const x0: i64 = @intFromFloat(x0f);
-    const y0: i64 = @intFromFloat(y0f);
+    const x0: i64 = coordInt(x0f);
+    const y0: i64 = coordInt(y0f);
     const xa = wrap(x0, lw, desc.address_u);
     const xb = wrap(x0 + 1, lw, desc.address_u);
     const ya = wrap(y0, lh, desc.address_v);
@@ -293,6 +293,14 @@ fn texel(desc: *const TexDesc, level: u32, lw: u32, x: u32, y: u32, out: *[4]f32
     }
 }
 
+/// Convert a texel coordinate to an integer without trapping: NaN (e.g. 0/0 from a helper
+/// lane or a degenerate q) maps to 0 and +-inf/huge values saturate, so address modes wrap or
+/// clamp them instead of the sampler panicking.
+fn coordInt(f: f32) i64 {
+    if (std.math.isNan(f)) return 0;
+    return @intFromFloat(std.math.clamp(f, -1073741824.0, 1073741824.0));
+}
+
 /// Sample mip `level` of the texture at `(u, v)` with the given in-level `filter`
 /// (nearest or linear), writing RGBA into `out`.
 fn sampleLevel(desc: *const TexDesc, level: u32, filter: Filter, u: f32, v: f32, out: *[4]f32) void {
@@ -304,8 +312,8 @@ fn sampleLevel(desc: *const TexDesc, level: u32, filter: Filter, u: f32, v: f32,
         .nearest => {
             const fx = @floor(u * @as(f32, @floatFromInt(lw)));
             const fy = @floor(v * @as(f32, @floatFromInt(lh)));
-            const x = wrap(@intFromFloat(fx), lw, desc.address_u);
-            const y = wrap(@intFromFloat(fy), lh, desc.address_v);
+            const x = wrap(coordInt(fx), lw, desc.address_u);
+            const y = wrap(coordInt(fy), lh, desc.address_v);
             texel(desc, lvl, lw, x, y, out);
         },
         .linear => {
@@ -315,8 +323,8 @@ fn sampleLevel(desc: *const TexDesc, level: u32, filter: Filter, u: f32, v: f32,
             const y0f = @floor(sy);
             const fx = sx - x0f;
             const fy = sy - y0f;
-            const x0: i64 = @intFromFloat(x0f);
-            const y0: i64 = @intFromFloat(y0f);
+            const x0: i64 = coordInt(x0f);
+            const y0: i64 = coordInt(y0f);
             const xa = wrap(x0, lw, desc.address_u);
             const xb = wrap(x0 + 1, lw, desc.address_u);
             const ya = wrap(y0, lh, desc.address_v);
@@ -579,8 +587,8 @@ pub fn sampleTextureGather(desc: *const TexDesc, u: f32, v: f32, comp: f32, out:
     // Same footprint as sampleLevel's linear branch: the 2x2 texels bracketing (u,v) - 0.5.
     const sx = u * @as(f32, @floatFromInt(lw)) - 0.5;
     const sy = v * @as(f32, @floatFromInt(lh)) - 0.5;
-    const x0: i64 = @intFromFloat(@floor(sx));
-    const y0: i64 = @intFromFloat(@floor(sy));
+    const x0: i64 = coordInt(@floor(sx));
+    const y0: i64 = coordInt(@floor(sy));
     const xa = wrap(x0, lw, desc.address_u); // i0
     const xb = wrap(x0 + 1, lw, desc.address_u); // i1
     const ya = wrap(y0, lh, desc.address_v); // j0
@@ -709,7 +717,7 @@ fn sampleSlice(desc: *const TexDesc, iz: u32, slice_bytes: usize, u: f32, v: f32
 pub const MathOp = enum(i32) { pow = 0, exp = 1, log = 2, exp2 = 3, log2 = 4, sin = 5, cos = 6, _ };
 
 pub fn mathFn(op: i32, a: f32, b: f32) callconv(.c) f32 {
-    return switch (@as(MathOp, @enumFromInt(op))) {
+    return switch (@as(MathOp, @fromBackingInt(@intCast(op)))) {
         .pow => std.math.pow(f32, a, b),
         .exp => @exp(a),
         .log => @log(a),
@@ -723,10 +731,10 @@ pub fn mathFn(op: i32, a: f32, b: f32) callconv(.c) f32 {
 
 test "mathFn computes the transcendentals the JIT dispatches" {
     const eps = 1e-4;
-    try std.testing.expectApproxEqAbs(@as(f32, 8.0), mathFn(@intFromEnum(MathOp.pow), 2.0, 3.0), eps);
-    try std.testing.expectApproxEqAbs(std.math.pow(f32, 0.5, 1.0 / 2.4), mathFn(@intFromEnum(MathOp.pow), 0.5, 1.0 / 2.4), eps);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), mathFn(@intFromEnum(MathOp.exp2), 2.0, 0), eps);
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), mathFn(@intFromEnum(MathOp.log2), 8.0, 0), eps);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), mathFn(@backingInt(MathOp.pow), 2.0, 3.0), eps);
+    try std.testing.expectApproxEqAbs(std.math.pow(f32, 0.5, 1.0 / 2.4), mathFn(@backingInt(MathOp.pow), 0.5, 1.0 / 2.4), eps);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), mathFn(@backingInt(MathOp.exp2), 2.0, 0), eps);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), mathFn(@backingInt(MathOp.log2), 8.0, 0), eps);
 }
 
 test "sampleTextureCube picks the face from the direction (skybox oracle)" {
