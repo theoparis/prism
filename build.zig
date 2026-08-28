@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulcan-glsl", .module = vulcan_dep.module("vulcan-glsl") },
         },
     });
+    prism.addImport("prism", prism);
 
     const linkage = b.option(std.builtin.LinkMode, "linkage", "Core library linkage") orelse .dynamic;
     b.installArtifact(b.addLibrary(.{ .name = "prism", .root_module = prism, .linkage = linkage }));

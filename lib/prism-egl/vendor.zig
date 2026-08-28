@@ -3,6 +3,7 @@
 //! fills the __EGLapiImports table that libEGL.so reads from __egl_Main.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const prism = @import("prism");
 const egl = @import("egl.zig");
 const state = @import("state.zig");
@@ -45,7 +46,10 @@ fn debugEnabled() bool {
 }
 
 /// True if env var `name` is set (any value), read libc-free from /proc/self/environ.
-fn envPresent(name: []const u8) bool {
+fn envPresent(name: [:0]const u8) bool {
+    if (comptime builtin.target.os.tag != .linux) {
+        return std.c.getenv(name.ptr) != null;
+    }
     const linux = std.os.linux;
     const fd: i32 = blk: {
         const rc = linux.open("/proc/self/environ", .{ .ACCMODE = .RDONLY }, 0);
@@ -406,7 +410,7 @@ pub fn eglCreateWindowSurface(
     //    native window is the app's gbm.Surface. Render into its back buffer; the
     //    app scans out the front buffer via gbm_surface_lock_front_buffer.
     if (d.gbmDevice() != null) {
-        const gbm_surface: *prism.platform.gbm.Surface = @ptrCast(@alignCast(native));
+        const gbm_surface: *state.GbmSurface = @ptrCast(@alignCast(native));
         const s = state.createGbmWindowSurface(d, idx, gbm_surface) catch |e| {
             setError(if (e == error.InvalidArgument) egl.EGL_BAD_NATIVE_WINDOW else eglErrorFor(e));
             return egl.EGL_NO_SURFACE;

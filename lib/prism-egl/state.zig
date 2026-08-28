@@ -10,6 +10,9 @@ const wlw = @import("wl_egl_window.zig");
 
 const EGLint = egl.EGLint;
 
+pub const GbmDevice = if (builtin.target.os.tag == .linux) prism.platform.gbm.Device else opaque {};
+pub const GbmSurface = if (builtin.target.os.tag == .linux) prism.platform.gbm.Surface else opaque {};
+
 /// Process-wide allocator for EGL objects. EGL has no allocator parameter, so
 /// we own one (page allocator, like the Vulkan ICD's object allocations).
 pub const gpa = std.heap.page_allocator;
@@ -145,9 +148,11 @@ pub const Display = struct {
     /// The app's gbm.Device for a GBM-platform display (the native pointer passed
     /// to eglGetPlatformDisplay(EGL_PLATFORM_GBM, gbm_device)), else null. The
     /// native window for such a display is a gbm.Surface.
-    pub fn gbmDevice(self: *Display) ?*prism.platform.gbm.Device {
-        if (self.platform == egl.EGL_PLATFORM_GBM_KHR) {
-            if (self.native) |n| return @ptrCast(@alignCast(n));
+    pub fn gbmDevice(self: *Display) ?*GbmDevice {
+        if (comptime builtin.target.os.tag == .linux) {
+            if (self.platform == egl.EGL_PLATFORM_GBM_KHR) {
+                if (self.native) |n| return @ptrCast(@alignCast(n));
+            }
         }
         return null;
     }
@@ -742,7 +747,8 @@ pub fn createWindowSurface(display: *Display, config_index: usize, plat_surface:
 /// display. Prism wraps the gbm.Surface in a platform.Surface adapter (which it
 /// owns) and presents into the gbm back buffer on eglSwapBuffers. The app then
 /// scans out the front buffer via gbm_surface_lock_front_buffer.
-pub fn createGbmWindowSurface(display: *Display, config_index: usize, gbm_surface: *prism.platform.gbm.Surface) prism.Error!*Surface {
+pub fn createGbmWindowSurface(display: *Display, config_index: usize, gbm_surface: *GbmSurface) prism.Error!*Surface {
+    if (comptime builtin.target.os.tag != .linux) return error.Unsupported;
     const plat = gpa.create(prism.platform.Surface) catch return error.OutOfMemory;
     plat.* = prism.platform.gbm.wrapSurface(gpa, gbm_surface) catch |e| {
         gpa.destroy(plat);
@@ -1376,6 +1382,7 @@ test "getPlatformDisplay is stable per (platform, native) and initialize reports
 }
 
 test "gbm: getPlatformDisplay + createGbmWindowSurface build a window surface aliasing the gbm buffer" {
+    if (builtin.target.os.tag != .linux) return;
     var mb = prism.platform.gbm.MemoryBackend.init(gpa);
     defer mb.deinit();
     var dev = prism.platform.gbm.Device.init(mb.allocator());

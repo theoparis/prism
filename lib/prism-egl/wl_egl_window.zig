@@ -194,16 +194,22 @@ pub const ShmBuffer = struct {
     height: u32,
 };
 
+const ShmPool = if (builtin.target.os.tag == .linux) wlz.shm.ShmPool else struct {
+    pub fn deinit(self: *@This()) void {
+        _ = self;
+    }
+};
+
 /// Per-EGL-window libwayland present state: the bound wl_shm on the app's display
 /// + N shm buffers + the app's wl_surface. Created on the first present (when the
 /// EGL display knows it is app-wl_display-bound) and reused/re-created on resize.
-pub const WaylandPresent = struct {
+pub const WaylandPresent = if (builtin.target.os.tag == .linux) struct {
     gpa: std.mem.Allocator,
     display: *wl_display,
     surface: *wl_surface,
     shm: *wl_proxy,
     pool: *wl_proxy,
-    shm_pool: wlz.shm.ShmPool,
+    shm_pool: ShmPool,
     buffers: []ShmBuffer,
     buffer_impls: []wl_buffer_listener,
     width: u32,
@@ -392,6 +398,39 @@ pub const WaylandPresent = struct {
             0,
         );
         _ = wl_display_flush(self.display);
+    }
+} else struct {
+    buffers: []ShmBuffer = &.{},
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        display: *wl_display,
+        surface: *wl_surface,
+        width: u32,
+        height: u32,
+        count: u32,
+    ) !*WaylandPresent {
+        _ = gpa;
+        _ = display;
+        _ = surface;
+        _ = width;
+        _ = height;
+        _ = count;
+        return error.Unsupported;
+    }
+
+    pub fn deinit(self: *WaylandPresent) void {
+        _ = self;
+    }
+
+    pub fn acquire(self: *WaylandPresent) u32 {
+        _ = self;
+        return 0;
+    }
+
+    pub fn present(self: *WaylandPresent, index: u32) void {
+        _ = self;
+        _ = index;
     }
 };
 

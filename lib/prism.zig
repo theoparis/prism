@@ -13,6 +13,10 @@ pub const Error = @import("prism/error.zig").Error;
 
 pub const platform = @import("prism/platform.zig");
 pub const drivers = @import("prism/drivers.zig");
+pub const egl = @import("prism-egl.zig");
+comptime {
+    _ = egl;
+}
 
 /// The target-agnostic SPIR-V shader front end (SPIR-V -> Vulcan IR). Drivers
 /// lower the IR to their target (NVIDIA SASS, aarch64 JIT).
